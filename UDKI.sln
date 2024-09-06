@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.11.35219.272
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "UDKI.Core", "UDKI.Core\UDKI.Core.csproj", "{FFDE4F3F-4EE4-41E5-AB49-1857051FFC04}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UDKI.Tool", "UDKI.Tool\UDKI.Tool.csproj", "{C5A25A82-0DB8-4E8C-A179-8BA170754DAE}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{FFDE4F3F-4EE4-41E5-AB49-1857051FFC04}.Debug|x64.ActiveCfg = Debug|x64
+		{FFDE4F3F-4EE4-41E5-AB49-1857051FFC04}.Debug|x64.Build.0 = Debug|x64
+		{FFDE4F3F-4EE4-41E5-AB49-1857051FFC04}.Release|x64.ActiveCfg = Release|x64
+		{FFDE4F3F-4EE4-41E5-AB49-1857051FFC04}.Release|x64.Build.0 = Release|x64
+		{C5A25A82-0DB8-4E8C-A179-8BA170754DAE}.Debug|x64.ActiveCfg = Debug|x64
+		{C5A25A82-0DB8-4E8C-A179-8BA170754DAE}.Debug|x64.Build.0 = Debug|x64
+		{C5A25A82-0DB8-4E8C-A179-8BA170754DAE}.Release|x64.ActiveCfg = Release|x64
+		{C5A25A82-0DB8-4E8C-A179-8BA170754DAE}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {353B103B-B1AA-42D6-BBA2-58749E1BB18D}
+	EndGlobalSection
+EndGlobal
