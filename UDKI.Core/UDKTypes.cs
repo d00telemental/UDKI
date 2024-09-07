@@ -167,6 +167,13 @@ public class UFunction : UStruct
     public IntPtr Func;
 }
 
+[UClass("Enum", fixedSize: 0x78)]
+public class UEnum : UField
+{
+    [UField("Names", 0x68, AsFName = true)]
+    public string[]? Names;
+}
+
 [UClass("Property", fixedSize: 0xA8)]
 public class UProperty : UField
 {

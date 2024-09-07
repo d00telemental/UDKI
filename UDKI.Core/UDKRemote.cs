@@ -1,4 +1,5 @@
 ﻿using Iced.Intel;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -25,6 +26,8 @@ public sealed class UDKRemote : IDisposable
     internal record struct PostfixRecord(object Outer, FieldInfo Field, Type type, nint Address);
     private readonly HashSet<PostfixRecord> _postfixes;
 
+    private readonly ArrayPool<byte> _objectMemoryPool;
+
     private readonly IntPtr _addressObjects;
     private readonly IntPtr _addressNames;
 
@@ -39,6 +42,7 @@ public sealed class UDKRemote : IDisposable
         _stream = new(new ProcessMemoryStream(_process), StreamBufferSize);
         _generation = new(_process, freezeThreads: false);
         _postfixes = [];
+        _objectMemoryPool = ArrayPool<byte>.Create();
 
         _addressObjects = ResolveMainOffset(UDKOffsets.GObjObjects);
         _addressNames = ResolveMainOffset(UDKOffsets.Names);
@@ -286,83 +290,85 @@ public sealed class UDKRemote : IDisposable
 
     #region Object reading internals.
 
-    object? ReadReflectedField(ReadOnlySpan<byte> objectBytes, object objectInstance,
+    object? ReadReflectedField(ReadOnlySpan<byte> sourceBytes, object objectInstance,
         FieldInfo fieldInfo, UFieldAttribute fieldAttribute, Dictionary<IntPtr, object> cache, uint depth)
     {
-        var fieldType = fieldInfo.FieldType;
-        var fieldOffset = fieldAttribute.FixedOffset;
+        var valueType = fieldInfo.FieldType;
+        var valueOffset = fieldAttribute.FixedOffset;
 
-        if (fieldType == typeof(sbyte))
+        if (valueType == typeof(sbyte))
         {
-            return (sbyte)objectBytes[fieldOffset];
+            return (sbyte)sourceBytes[valueOffset];
         }
 
-        if (fieldType == typeof(byte))
+        if (valueType == typeof(byte))
         {
-            return objectBytes[fieldOffset];
+            return sourceBytes[valueOffset];
         }
 
-        if (fieldType == typeof(short))
+        if (valueType == typeof(short))
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(short));
+            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(short));
             return BinaryPrimitives.ReadInt16LittleEndian(fieldSlice);
         }
 
-        if (fieldType == typeof(ushort))
+        if (valueType == typeof(ushort))
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(ushort));
+            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(ushort));
             return BinaryPrimitives.ReadUInt16LittleEndian(fieldSlice);
         }
 
-        if (fieldType == typeof(int))
+        if (valueType == typeof(int))
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(int));
+            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(int));
             return BinaryPrimitives.ReadInt32LittleEndian(fieldSlice);
         }
 
-        if (fieldType == typeof(uint))
+        if (valueType == typeof(uint))
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(uint));
+            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(uint));
             return BinaryPrimitives.ReadUInt32LittleEndian(fieldSlice);
         }
 
-        if (fieldType == typeof(long))
+        if (valueType == typeof(long))
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(long));
+            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(long));
             return BinaryPrimitives.ReadInt64LittleEndian(fieldSlice);
         }
 
-        if (fieldType == typeof(ulong))
+        if (valueType == typeof(ulong))
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(ulong));
+            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(ulong));
             return BinaryPrimitives.ReadUInt64LittleEndian(fieldSlice);
         }
 
-        if (fieldType == typeof(IntPtr))
+        if (valueType == typeof(IntPtr))
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, 8);
+            var fieldSlice = sourceBytes.Slice(valueOffset, 8);
             return BinaryPrimitives.ReadIntPtrLittleEndian(fieldSlice);
         }
 
-        if (fieldType == typeof(UIntPtr))
+        if (valueType == typeof(UIntPtr))
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, 8);
+            var fieldSlice = sourceBytes.Slice(valueOffset, 8);
             return BinaryPrimitives.ReadUIntPtrLittleEndian(fieldSlice);
         }
 
-        if (fieldType == typeof(string) && fieldAttribute.AsFName)
+        if (valueType == typeof(string) && fieldAttribute.AsFName)
         {
-            var fieldSlice = objectBytes.Slice(fieldOffset, 8);
+            var fieldSlice = sourceBytes.Slice(valueOffset, 8);
             FName name = MemoryMarshal.Read<FName>(fieldSlice);
             return ReadName(name);
         }
 
-        if (fieldType.IsClass)
+        if (valueType.IsClass)
         {
-            var fieldPointer = BinaryPrimitives.ReadIntPtrLittleEndian(objectBytes.Slice(fieldOffset, 8));
+            var fieldSlice = sourceBytes.Slice(valueOffset, 8);
+            var fieldPointer = BinaryPrimitives.ReadIntPtrLittleEndian(fieldSlice);
+
             if (fieldPointer == IntPtr.Zero) return null;
 
-            var fieldValue = ReadReflectedInstance(fieldType, fieldPointer, cache, depth + 1);
+            var fieldValue = ReadReflectedInstance(valueType, fieldPointer, cache, depth + 1);
             var classAttribute = Attribute.GetCustomAttribute(fieldValue.GetType(), typeof(UClassAttribute)) as UClassAttribute;
 
             if (CheckNeedsDowncast(fieldPointer, fieldValue, fieldInfo, objectInstance, classAttribute!, out Type lowerType))
@@ -371,7 +377,7 @@ public sealed class UDKRemote : IDisposable
             return fieldValue;
         }
 
-        throw new NotImplementedException($"deserialization for type {fieldType.FullName} is not implemented");
+        throw new NotImplementedException($"deserialization for type {valueType.FullName} is not implemented");
     }
 
     object ReadReflectedInstance(Type type, IntPtr address, Dictionary<IntPtr, object> cache, uint depth)
@@ -379,15 +385,15 @@ public sealed class UDKRemote : IDisposable
         if (cache.TryGetValue(address, out object? saved) && !type.IsSubclassOf(saved!.GetType()))
         {
             // Generally, we would like to avoid recursive re-deserialization of same instances.
-            // However when we are re-deserializing an instance cached with a higher type, we want to update it.
+            // However when deserializing an instance cached with a higher type, we want to update it.
             return saved;
         }
 
         var classAttribute = Attribute.GetCustomAttribute(type, typeof(UClassAttribute)) as UClassAttribute
             ?? throw new InvalidOperationException($"type {type.Name} is not reflected");
 
-        var objectBytes = new byte[classAttribute.FixedSize];
-        _process.ReadMemoryChecked(address, objectBytes);
+        var objectBytes = _objectMemoryPool.Rent(classAttribute.FixedSize);
+        _process.ReadMemoryChecked(address, objectBytes.AsSpan()[..classAttribute.FixedSize]);
 
         var objectInstance = Activator.CreateInstance(type)!;
         cache[address] = objectInstance;
@@ -401,6 +407,8 @@ public sealed class UDKRemote : IDisposable
                 fieldInfo.SetValueDirect(__makeref(objectInstance), fieldValue!);
             }
         }
+
+        _objectMemoryPool.Return(objectBytes, clearArray: true);
 
         if (CheckNeedsDowncast(IntPtr.Zero, null, null, objectInstance, classAttribute, out Type lowerType))
         {
@@ -480,7 +488,7 @@ public sealed class UDKRemote : IDisposable
         _postfixes.Clear();
         var instance = (T)ReadReflectedInstance(typeof(T), address, generation.Instances, 0);
 
-        // We need to apply postfixes here handle some recursion edge cases
+        // We need to apply postfixes here to handle some recursion edge cases
         // where UObject-derived instance is correctly re-serialized with a lower-derived
         // type and submitted to generation cache, but that re-serialization is not propagated
         // to the receiving instance's field.
