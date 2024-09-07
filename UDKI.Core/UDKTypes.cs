@@ -168,7 +168,7 @@ public class UFunction : UStruct
 }
 
 [UClass("Property", fixedSize: 0xA8)]
-public class UProperty : UStruct
+public class UProperty : UField
 {
     [UField("ArrayDim", 0x68)]
     public int ArrayDim;
@@ -193,3 +193,97 @@ public class UProperty : UStruct
     [UField("NextRef", 0xA0)]
     public UProperty? NextRef;
 }
+
+[UClass("ByteProperty", fixedSize: 0xB0)]
+public class UByteProperty : UProperty
+{
+    [UField("Enum", 0xA8)]
+    public IntPtr Enum;
+}
+
+[UClass("IntProperty", fixedSize: 0xA8)]
+public class UIntProperty : UProperty
+{
+    // ...
+}
+
+[UClass("FloatProperty", fixedSize: 0xA8)]
+public class UFloatProperty : UProperty
+{
+    // ...
+}
+
+[UClass("BoolProperty", fixedSize: 0xAC)]
+public class UBoolProperty : UProperty
+{
+    [UField("BitMask", 0xA8)]
+    public uint BitMask;
+}
+
+[UClass("StrProperty", fixedSize: 0xA8)]
+public class UStrProperty : UProperty
+{
+    // ...
+}
+
+[UClass("NameProperty", fixedSize: 0xA8)]
+public class UNameProperty : UProperty
+{
+    // ...
+}
+
+[UClass("DelegateProperty", fixedSize: 0xB8)]
+public class UDelegateProperty : UProperty
+{
+    [UField("Function", 0xA8)]
+    public UFunction? Function;
+    [UField("Function", 0xB0)]
+    public UFunction? SourceDelegate;
+}
+
+[UClass("ObjectProperty", fixedSize: 0xB0)]
+public class UObjectProperty : UProperty
+{
+    [UField("PropertyClass", 0xA8)]
+    public UClass? PropertyClass;
+}
+
+[UClass("ClassProperty", fixedSize: 0xB8)]
+public class UClassProperty : UObjectProperty
+{
+    [UField("MetaClass", 0xB0)]
+    public UClass? MetaClass;
+}
+
+[UClass("InterfaceProperty", fixedSize: 0xB0)]
+public class UInterfaceProperty : UProperty
+{
+    [UField("InterfaceClass", 0xA8)]
+    public UClass? InterfaceClass;
+}
+
+[UClass("StructProperty", fixedSize: 0xB0)]
+public class UStructProperty : UProperty
+{
+    [UField("Struct", 0xA8)]
+    public UStruct? Struct;
+}
+
+[UClass("ArrayProperty", fixedSize: 0xB0)]
+public class UArrayProperty : UProperty
+{
+    [UField("Inner", 0xA8)]
+    public UProperty? Inner;
+}
+
+[UClass("MapProperty", fixedSize: 0xB8)]
+public class UMapProperty : UProperty
+{
+    [UField("Key", 0xA8)]
+    public UProperty? Key;
+    [UField("Value", 0xB0)]
+    public UProperty? Value;
+}
+
+
+// TODO: UConst, UEnum, UScriptStruct

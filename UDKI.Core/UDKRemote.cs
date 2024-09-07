@@ -432,16 +432,28 @@ public sealed class UDKRemote : IDisposable
                 Type? lowerTypeChecked = className switch
                 {
                     "Field" => typeof(UField),
-                    "Struct" => typeof(UStruct),
+                    "Struct" or "ScriptStruct" => typeof(UStruct),
                     "State" => typeof(UState),
                     "Class" => typeof(UClass),
                     "Function" => typeof(UFunction),
                     "Property" => typeof(UProperty),
+                    "ByteProperty" => typeof(UByteProperty),
+                    "IntProperty" => typeof(UIntProperty),
+                    "FloatProperty" => typeof(UFloatProperty),
+                    "BoolProperty" => typeof(UBoolProperty),
+                    "StrProperty" => typeof(UStrProperty),
+                    "NameProperty" => typeof(UNameProperty),
+                    "DelegateProperty" => typeof(UDelegateProperty),
+                    "ObjectProperty" => typeof(UObjectProperty),
+                    "ClassProperty" => typeof(UClassProperty),
+                    "InterfaceProperty" => typeof(UInterfaceProperty),
+                    "StructProperty" => typeof(UStructProperty),
+                    "ArrayProperty" => typeof(UArrayProperty),
+                    "MapProperty" => typeof(UMapProperty),
                     _ => null,
                 };
 
-                var objectType = fieldInstance.GetType();
-                if (lowerTypeChecked is not null && lowerTypeChecked.IsSubclassOf(objectType))
+                if (lowerTypeChecked?.IsSubclassOf(fieldInstance.GetType()) ?? false)
                 {
                     lowerType = lowerTypeChecked;
                     return true;
