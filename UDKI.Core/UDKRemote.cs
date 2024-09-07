@@ -1,5 +1,4 @@
 ﻿using Iced.Intel;
-using Microsoft.VisualBasic;
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -23,6 +22,9 @@ public sealed class UDKRemote : IDisposable
     /// </summary>
     private readonly UDKGeneration _generation;
 
+    internal record struct PostfixRecord(object Outer, FieldInfo Field, Type type, nint Address);
+    private readonly HashSet<PostfixRecord> _postfixes;
+
     private readonly IntPtr _addressObjects;
     private readonly IntPtr _addressNames;
 
@@ -36,6 +38,7 @@ public sealed class UDKRemote : IDisposable
         _process = process;
         _stream = new(new ProcessMemoryStream(_process), StreamBufferSize);
         _generation = new(_process, freezeThreads: false);
+        _postfixes = [];
 
         _addressObjects = ResolveMainOffset(UDKOffsets.GObjObjects);
         _addressNames = ResolveMainOffset(UDKOffsets.Names);
@@ -283,82 +286,88 @@ public sealed class UDKRemote : IDisposable
 
     #region Object reading internals.
 
-    object? ReadReflectedField(ReadOnlySpan<byte> classBytes, Type fieldType,
-        UFieldAttribute fieldAttribute, Dictionary<IntPtr, object> cache, uint depth)
+    object? ReadReflectedField(ReadOnlySpan<byte> objectBytes, object objectInstance,
+        FieldInfo fieldInfo, UFieldAttribute fieldAttribute, Dictionary<IntPtr, object> cache, uint depth)
     {
+        var fieldType = fieldInfo.FieldType;
         var fieldOffset = fieldAttribute.FixedOffset;
 
         if (fieldType == typeof(sbyte))
         {
-            return (sbyte)classBytes[fieldOffset];
+            return (sbyte)objectBytes[fieldOffset];
         }
 
         if (fieldType == typeof(byte))
         {
-            return classBytes[fieldOffset];
+            return objectBytes[fieldOffset];
         }
 
         if (fieldType == typeof(short))
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, sizeof(short));
+            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(short));
             return BinaryPrimitives.ReadInt16LittleEndian(fieldSlice);
         }
 
         if (fieldType == typeof(ushort))
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, sizeof(ushort));
+            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(ushort));
             return BinaryPrimitives.ReadUInt16LittleEndian(fieldSlice);
         }
 
         if (fieldType == typeof(int))
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, sizeof(int));
+            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(int));
             return BinaryPrimitives.ReadInt32LittleEndian(fieldSlice);
         }
 
         if (fieldType == typeof(uint))
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, sizeof(uint));
+            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(uint));
             return BinaryPrimitives.ReadUInt32LittleEndian(fieldSlice);
         }
 
         if (fieldType == typeof(long))
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, sizeof(long));
+            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(long));
             return BinaryPrimitives.ReadInt64LittleEndian(fieldSlice);
         }
 
         if (fieldType == typeof(ulong))
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, sizeof(ulong));
+            var fieldSlice = objectBytes.Slice(fieldOffset, sizeof(ulong));
             return BinaryPrimitives.ReadUInt64LittleEndian(fieldSlice);
         }
 
         if (fieldType == typeof(IntPtr))
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, 8);
+            var fieldSlice = objectBytes.Slice(fieldOffset, 8);
             return BinaryPrimitives.ReadIntPtrLittleEndian(fieldSlice);
         }
 
         if (fieldType == typeof(UIntPtr))
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, 8);
+            var fieldSlice = objectBytes.Slice(fieldOffset, 8);
             return BinaryPrimitives.ReadUIntPtrLittleEndian(fieldSlice);
         }
 
         if (fieldType == typeof(string) && fieldAttribute.AsFName)
         {
-            var fieldSlice = classBytes.Slice(fieldOffset, 8);
+            var fieldSlice = objectBytes.Slice(fieldOffset, 8);
             FName name = MemoryMarshal.Read<FName>(fieldSlice);
             return ReadName(name);
         }
 
         if (fieldType.IsClass)
         {
-            IntPtr pointer = BinaryPrimitives.ReadIntPtrLittleEndian(classBytes.Slice(fieldOffset, 8));
-            if (pointer == IntPtr.Zero) return null;
+            var fieldPointer = BinaryPrimitives.ReadIntPtrLittleEndian(objectBytes.Slice(fieldOffset, 8));
+            if (fieldPointer == IntPtr.Zero) return null;
 
-            object fieldValue = ReadReflectedInstance(fieldType, pointer, cache, depth + 1);
+            var fieldValue = ReadReflectedInstance(fieldType, fieldPointer, cache, depth + 1);
+            var classAttribute = Attribute.GetCustomAttribute(fieldValue.GetType(), typeof(UClassAttribute)) as UClassAttribute;
+
+            if (CheckNeedsDowncast(fieldPointer, fieldValue, fieldInfo, objectInstance, classAttribute!, out Type lowerType))
+                fieldValue = ReadReflectedInstance(lowerType, fieldPointer, cache, depth + 1);
+
             return fieldValue;
         }
 
@@ -376,32 +385,51 @@ public sealed class UDKRemote : IDisposable
 
         var classAttribute = Attribute.GetCustomAttribute(type, typeof(UClassAttribute)) as UClassAttribute
             ?? throw new InvalidOperationException($"type {type.Name} is not reflected");
-        var classInstanceBytes = new byte[classAttribute.FixedSize];
 
-        _process.ReadMemoryChecked(address, classInstanceBytes);
+        var objectBytes = new byte[classAttribute.FixedSize];
+        _process.ReadMemoryChecked(address, objectBytes);
 
-        object instance = Activator.CreateInstance(type)!;
-        cache[address] = instance;
+        var objectInstance = Activator.CreateInstance(type)!;
+        cache[address] = objectInstance;
 
         foreach (FieldInfo fieldInfo in type.GetFields())
         {
             // Fields on reflected types are allowed to not be reflected.
             if (fieldInfo.GetCustomAttribute(typeof(UFieldAttribute)) is UFieldAttribute fieldAttribute)
             {
-                var fieldValue = ReadReflectedField(classInstanceBytes, fieldInfo.FieldType, fieldAttribute, cache, depth);
-                fieldInfo.SetValue(instance, fieldValue);
+                var fieldValue = ReadReflectedField(objectBytes, objectInstance, fieldInfo, fieldAttribute, cache, depth);
+                fieldInfo.SetValueDirect(__makeref(objectInstance), fieldValue!);
             }
         }
 
-        if (instance is UObject @object)
+        if (CheckNeedsDowncast(IntPtr.Zero, null, null, objectInstance, classAttribute, out Type lowerType))
         {
             // If we detect a sliced UObject read, re-serialize the instance with a derived type.
             // This is horribly inefficient but we want to pull in all the descendants we can reach.
+            objectInstance = ReadReflectedInstance(lowerType, address, cache, depth);
+        }
 
+        return objectInstance;
+    }
+
+    bool CheckNeedsDowncast(IntPtr fieldPointer, object? fieldInstance, FieldInfo? fieldInfo,
+        object outerInstance, UClassAttribute classAttribute, out Type lowerType)
+    {
+        if (fieldInstance is UObject @object)
+        {
             string? className = @object.Class?.Name;
+
+            if (className is null && fieldInfo is not null)
+            {
+                // If UObject.Class or its name are null, we're 99.9% dealing with a sliced read which will
+                // fail to propagate to the outer field instance correctly... So just store enough things to pull
+                // the correctly-typed instance from cache at a later point.
+                _postfixes.Add(new PostfixRecord(outerInstance, fieldInfo!, fieldInstance!.GetType(), fieldPointer));
+            }
+
             if (classAttribute.Name != className && !string.IsNullOrEmpty(className))
             {
-                Type? lowerType = className switch
+                Type? lowerTypeChecked = className switch
                 {
                     "Field" => typeof(UField),
                     "Struct" => typeof(UStruct),
@@ -412,18 +440,45 @@ public sealed class UDKRemote : IDisposable
                     _ => null,
                 };
 
-                var objectType = instance.GetType();
-                if (lowerType is not null && lowerType.IsSubclassOf(objectType))
-                    return ReadReflectedInstance(lowerType, address, cache, depth);
+                var objectType = fieldInstance.GetType();
+                if (lowerTypeChecked is not null && lowerTypeChecked.IsSubclassOf(objectType))
+                {
+                    lowerType = lowerTypeChecked;
+                    return true;
+                }
             }
         }
 
-        return instance;
+        lowerType = typeof(void);
+        return false;
     }
 
     #endregion
 
 
+    /// <summary>
+    /// Deserializes an instance of a reflected type.
+    /// </summary>
+    /// <typeparam name="T">Destination type, must be annotated with <see cref="UClassAttribute"/>.</typeparam>
+    /// <param name="address">Remote source pointer (as an absolute offset).</param>
+    /// <param name="generation">Generation which should be used for instance tree caching.</param>
+    /// <returns>Deserialized object.</returns>
     public T ReadReflectedInstance<T>(IntPtr address, UDKGeneration generation)
-        => (T)ReadReflectedInstance(typeof(T), address, generation.Instances, 0);
+    {
+        _postfixes.Clear();
+        var instance = (T)ReadReflectedInstance(typeof(T), address, generation.Instances, 0);
+
+        // We need to apply postfixes here handle some recursion edge cases
+        // where UObject-derived instance is correctly re-serialized with a lower-derived
+        // type and submitted to generation cache, but that re-serialization is not propagated
+        // to the receiving instance's field.
+
+        foreach (var (outer, field, type, pointer) in _postfixes)
+        {
+            var value = ReadReflectedInstance(type, pointer, generation.Instances, 0);
+            field.SetValue(outer, value);
+        }
+
+        return instance;
+    }
 }
