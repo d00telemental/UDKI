@@ -1,5 +1,9 @@
 ﻿using System.Buffers.Binary;
 using System.Diagnostics;
+
+using Iced.Intel;
+using static Iced.Intel.AssemblerRegisters;
+
 using UDKI.Core;
 
 
@@ -39,6 +43,12 @@ try
     using var remote = new UDKRemote(process);
     println($"established remote connection");
 
+    var returnValue = remote.Execute(
+        sizeof(ulong),
+        (asm) => asm.mov(__qword_ptr[rcx], 43),
+        (output) => BinaryPrimitives.ReadUInt64LittleEndian(output));
+
+    println($"injected code returned {returnValue}");
 
     using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: false))
     {
@@ -49,6 +59,8 @@ try
 
             IntPtr pointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes);
             var @object = remote.ReadReflectedInstance<UObject>(pointer, generation);
+
+            println($"deserialized first object {@object}");
         }, maxStackSize: 100 * 1024 * 1024);
 
         execThread.Start();

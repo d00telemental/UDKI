@@ -1,9 +1,10 @@
-﻿using Iced.Intel;
-using System.Buffers;
+﻿using System.Buffers;
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+
+using Iced.Intel;
 using static Iced.Intel.AssemblerRegisters;
 
 
@@ -26,15 +27,20 @@ public sealed class UDKRemote : IDisposable
     internal record struct PostfixRecord(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
     private readonly HashSet<PostfixRecord> _postfixes;
 
+    private readonly IntPtr _returnValueAllocation;
+    private readonly byte[] _returnValueZeroes;
+
     private readonly ArrayPool<byte> _objectMemoryPool;
 
     private readonly IntPtr _addressObjects;
     private readonly IntPtr _addressNames;
 
-    /// <summary>
-    /// Using a really small buffer to reduce risk of running into a protected region.
-    /// </summary>
-    private const int StreamBufferSize = 128;
+    /// <summary>Number of bytes allocated for return value buffer.</summary>
+    /// <remarks>We anticipate mostly returning pointers or small structs, so a page should be more than enough.</remarks>
+    public const int ReturnBufferSize = 4096;
+    /// <summary>Number of bytes used for internal read-ahead buffer.</summary>
+    /// <remarks>Using a really small buffer to reduce risk of running into a protected region.</remarks>
+    public const int StreamBufferSize = 128;
 
     public UDKRemote(ProcessHandle process)
     {
@@ -42,6 +48,12 @@ public sealed class UDKRemote : IDisposable
         _stream = new(new ProcessMemoryStream(_process), StreamBufferSize);
         _generation = new(_process, freezeThreads: false);
         _postfixes = [];
+
+        _returnValueAllocation = _process.Alloc(ReturnBufferSize);
+        _returnValueZeroes = new byte[ReturnBufferSize];
+
+        Array.Fill<byte>(_returnValueZeroes, 0xDD);
+
         _objectMemoryPool = ArrayPool<byte>.Create();
 
         _addressObjects = ResolveMainOffset(UDKOffsets.GObjObjects);
@@ -63,6 +75,7 @@ public sealed class UDKRemote : IDisposable
                 _stream.Dispose();
             }
 
+            _process.Free(_returnValueAllocation);
             _disposedValue = true;
         }
     }
@@ -125,12 +138,36 @@ public sealed class UDKRemote : IDisposable
 
     #endregion
 
-    /// <summary>
-    /// Executes a manually-constructed piece of assembly code in a new remote thread.
-    /// </summary>
-    /// <param name="writeAssemblyBody">Callback that generates the code to execute, absent prologue and epilogue.</param>
-    public void ExecuteCode(Action<Assembler> writeAssemblyBody)
+
+    /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread, extracting value from an internal output buffer.</summary>
+    /// <typeparam name="T">Type of the extracted return value.</typeparam>
+    /// <param name="returnValueSize">Number of bytes to allocate on .NET side for receiving a copy of the output buffer.</param>
+    /// <param name="writeAssemblyBody">Callback that generates body of code to execute.</param>
+    /// <param name="extractReturnValue">Callback that extracts a value from the output buffer (exactly <c>returnValueSize</c> bytes long).</param>
+    /// <returns>Extracted value.</returns>
+    public T Execute<T>(int returnValueSize, Action<Assembler> writeAssemblyBody, Func<byte[], T> extractReturnValue)
     {
+        var returnBuffer = new byte[returnValueSize];
+        Execute(returnBuffer, writeAssemblyBody);
+        return extractReturnValue(returnBuffer);
+    }
+
+    /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread, without returning data.</summary>
+    /// <param name="writeAssemblyBody">Callback that generates body of code to execute.</param>
+    public void Execute(Action<Assembler> writeAssemblyBody)
+        => Execute([], writeAssemblyBody);
+
+    /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread.</summary>
+    /// <param name="returnValueBytes">Buffer which will receive a copy of data from the internal return value buffer.</param>
+    /// <param name="writeAssemblyBody">Callback that generates body of code to execute, with return buffer address available in rcx.</param>
+    public void Execute(Span<byte> returnValueBytes, Action<Assembler> writeAssemblyBody)
+    {
+        switch (returnValueBytes.Length)
+        {
+            case > ReturnBufferSize: throw new ArgumentException("return buffer too large", nameof(returnValueBytes));
+            case > 0: _process.WriteMemoryChecked(_returnValueAllocation, _returnValueZeroes); break;
+        }
+
         Assembler localAssembler = new(64);
 
         WriteAssemblyPrologue(localAssembler);
@@ -140,16 +177,15 @@ public sealed class UDKRemote : IDisposable
         var alignedLength = (ulong)EstimateAssemblySize(localAssembler);
         var allocatedBuffer = _process.Alloc(alignedLength);
 
-        var assemblyBinary = BuildAssembly(localAssembler, (ulong)allocatedBuffer);
-
-        Debug.WriteLine($"allocated {alignedLength} byte(s) at {allocatedBuffer} (0x{allocatedBuffer:X})");
-
         try
         {
-            _process.WriteMemoryChecked(allocatedBuffer, assemblyBinary);
+            var assembledBinary = BuildAssembly(localAssembler, (ulong)allocatedBuffer);
+
+            _process.WriteMemoryChecked(allocatedBuffer, assembledBinary);
             _process.ProtectExecutable(allocatedBuffer, alignedLength);
 
-            var thread = _process.CreateThread(allocatedBuffer, out var id);
+            var parameter = returnValueBytes.IsEmpty ? IntPtr.Zero : _returnValueAllocation;
+            var thread = _process.CreateThread(allocatedBuffer, parameter, out var id);
             Debug.WriteLine($"created temporary thread with id = {id}");
 
             Windows.WaitForSingleObject(thread);
@@ -158,6 +194,11 @@ public sealed class UDKRemote : IDisposable
         finally
         {
             _process.Free(allocatedBuffer);
+        }
+
+        if (!returnValueBytes.IsEmpty)
+        {
+            _process.ReadMemoryChecked(_returnValueAllocation, returnValueBytes);
         }
     }
 
@@ -544,9 +585,7 @@ public sealed class UDKRemote : IDisposable
     #endregion
 
 
-    /// <summary>
-    /// Deserializes an instance of a reflected type.
-    /// </summary>
+    /// <summary>Deserializes an instance of a reflected type.</summary>
     /// <typeparam name="T">Destination type, must be annotated with <see cref="UClassAttribute"/>.</typeparam>
     /// <param name="address">Remote source pointer (as an absolute offset).</param>
     /// <param name="generation">Generation which should be used for instance tree caching.</param>

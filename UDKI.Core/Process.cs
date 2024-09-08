@@ -68,9 +68,9 @@ public class ProcessHandle : IDisposable
     /// Creates a thread within the process.
     /// </summary>
     /// <returns>Handle to created thread.</returns>
-    public IntPtr CreateThread(IntPtr Address, out uint Id)
+    public IntPtr CreateThread(IntPtr Address, IntPtr Parameter, out uint Id)
     {
-        return Windows.CreateRemoteThread(this, Address, IntPtr.Zero, out Id);
+        return Windows.CreateRemoteThread(this, Address, Parameter, out Id);
     }
 
     /// <summary>
