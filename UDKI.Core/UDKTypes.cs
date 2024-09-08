@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace UDKI.Core;
@@ -14,6 +15,21 @@ public struct FArray
     public IntPtr Allocation;
     public int Count;
     public int Capacity;
+
+    public FArray()
+    {
+        // ...
+    }
+
+    public FArray(ReadOnlySpan<byte> arrayView)
+    {
+        if (arrayView.Length != 16)
+            throw new ArgumentException("array view too short", nameof(arrayView));
+
+        Allocation = BinaryPrimitives.ReadIntPtrLittleEndian(arrayView[0..8]);
+        Count = BinaryPrimitives.ReadInt32LittleEndian(arrayView[8..12]);
+        Capacity = BinaryPrimitives.ReadInt32LittleEndian(arrayView[12..16]);
+    }
 
     public readonly IntPtr GetItemOffset(int index, int size)
     {
@@ -167,6 +183,24 @@ public class UFunction : UStruct
     public IntPtr Func;
 }
 
+[UClass("ScriptStruct", fixedSize:0xF4)]
+public class UScriptStruct : UStruct
+{
+    [UField("DefaultStructPropText", 0xD0)]
+    public string DefaultStructPropText = string.Empty;
+    [UField("StructFlags", 0xE0)]
+    public int StructFlags;
+    [UField("StructDefaults", 0xE4)]
+    public byte[]? StructDefaults;
+}
+
+[UClass("Const", fixedSize: 0x78)]
+public class UConst : UField
+{
+    [UField("Value", 0x68)]
+    public string Value = string.Empty;
+}
+
 [UClass("Enum", fixedSize: 0x78)]
 public class UEnum : UField
 {
@@ -190,7 +224,7 @@ public class UProperty : UField
     [UField("Category", 0x7C, AsFName = true)]
     public string Category = string.Empty;
     [UField("ArraySizeEnum", 0x84)]
-    public IntPtr ArraySizeEnum;
+    public UEnum? ArraySizeEnum;
     [UField("Offset", 0x8C)]
     public int Offset;
     [UField("PropertyLinkNext", 0x90)]
@@ -205,7 +239,7 @@ public class UProperty : UField
 public class UByteProperty : UProperty
 {
     [UField("Enum", 0xA8)]
-    public IntPtr Enum;
+    public UEnum? Enum;
 }
 
 [UClass("IntProperty", fixedSize: 0xA8)]
@@ -273,7 +307,7 @@ public class UInterfaceProperty : UProperty
 public class UStructProperty : UProperty
 {
     [UField("Struct", 0xA8)]
-    public UStruct? Struct;
+    public UScriptStruct? Struct;
 }
 
 [UClass("ArrayProperty", fixedSize: 0xB0)]
@@ -291,6 +325,3 @@ public class UMapProperty : UProperty
     [UField("Value", 0xB0)]
     public UProperty? Value;
 }
-
-
-// TODO: UConst, UEnum, UScriptStruct
