@@ -43,12 +43,13 @@ try
     using var remote = new UDKRemote(process);
     println($"established remote connection");
 
-    var returnValue = remote.Execute(
-        sizeof(ulong),
-        (asm) => asm.mov(__qword_ptr[rcx], 43),
-        (output) => BinaryPrimitives.ReadUInt64LittleEndian(output));
+    foreach (var inputString in new string[] { "Test_907", "None_1", "Object", "IntProperty" })
+    {
+        var outputName = remote.AllocName(inputString, bSplitName: true);
+        var outputString = remote.ReadName(outputName);
 
-    println($"injected code returned {returnValue}");
+        println($"roundtrip for '{inputString}' name: '{outputString}' (number = {outputName.NumberPlusOne})");
+    }
 
     using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: false))
     {
@@ -60,7 +61,7 @@ try
             IntPtr pointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes);
             var @object = remote.ReadReflectedInstance<UObject>(pointer, generation);
 
-            println($"deserialized first object {@object}");
+            println($"deserialized first object: {@object}");
         }, maxStackSize: 100 * 1024 * 1024);
 
         execThread.Start();

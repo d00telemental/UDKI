@@ -18,29 +18,33 @@ public sealed class UDKRemote : IDisposable
 {
     private readonly ProcessHandle _process;
     private readonly BufferedStream _stream;
-
-    /// <summary>
-    /// Used for types that are unlikely to change, plus all the names.
-    /// </summary>
     private readonly UDKGeneration _generation;
 
     internal record struct PostfixRecord(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
     private readonly HashSet<PostfixRecord> _postfixes;
 
-    private readonly IntPtr _returnValueAllocation;
-    private readonly byte[] _returnValueZeroes;
+    private readonly IntPtr _inputBufferAllocation;
+    private readonly byte[] _inputBufferZeros;
+    private readonly IntPtr _outputBufferAllocation;
+    private readonly byte[] _outputBufferZeros;
+
+    private readonly IntPtr _paramStructAllocation;
 
     private readonly ArrayPool<byte> _objectMemoryPool;
 
     private readonly IntPtr _addressObjects;
     private readonly IntPtr _addressNames;
+    private readonly IntPtr _addressFNameInit;
 
-    /// <summary>Number of bytes allocated for return value buffer.</summary>
-    /// <remarks>We anticipate mostly returning pointers or small structs, so a page should be more than enough.</remarks>
-    public const int ReturnBufferSize = 4096;
+    /// <summary>Number of bytes allocated for internal parameters buffer.</summary>
+    public const int InputBufferSize = 1024;
+    /// <summary>Number of bytes allocated for internal return value buffer.</summary>
+    public const int OutputBufferSize = 1024;
+
     /// <summary>Number of bytes used for internal read-ahead buffer.</summary>
     /// <remarks>Using a really small buffer to reduce risk of running into a protected region.</remarks>
     public const int StreamBufferSize = 128;
+
 
     public UDKRemote(ProcessHandle process)
     {
@@ -49,15 +53,26 @@ public sealed class UDKRemote : IDisposable
         _generation = new(_process, freezeThreads: false);
         _postfixes = [];
 
-        _returnValueAllocation = _process.Alloc(ReturnBufferSize);
-        _returnValueZeroes = new byte[ReturnBufferSize];
+        _inputBufferAllocation = _process.Alloc(InputBufferSize);
+        _inputBufferZeros = new byte[InputBufferSize];
+        Array.Fill<byte>(_inputBufferZeros, 0xCC);
 
-        Array.Fill<byte>(_returnValueZeroes, 0xDD);
+        _outputBufferAllocation = _process.Alloc(OutputBufferSize);
+        _outputBufferZeros = new byte[OutputBufferSize];
+        Array.Fill<byte>(_outputBufferZeros, 0xDD);
+
+        Span<byte> paramStructBytes = stackalloc byte[16];
+        BinaryPrimitives.WriteIntPtrLittleEndian(paramStructBytes[0..8], _inputBufferAllocation);
+        BinaryPrimitives.WriteIntPtrLittleEndian(paramStructBytes[8..16], _outputBufferAllocation);
+
+        _paramStructAllocation = _process.Alloc(16);
+        _process.WriteMemoryChecked(_paramStructAllocation, paramStructBytes);
 
         _objectMemoryPool = ArrayPool<byte>.Create();
 
         _addressObjects = ResolveMainOffset(UDKOffsets.GObjObjects);
         _addressNames = ResolveMainOffset(UDKOffsets.Names);
+        _addressFNameInit = ResolveMainOffset(0x268090);
     }
 
 
@@ -75,7 +90,10 @@ public sealed class UDKRemote : IDisposable
                 _stream.Dispose();
             }
 
-            _process.Free(_returnValueAllocation);
+            _process.Free(_inputBufferAllocation);
+            _process.Free(_outputBufferAllocation);
+            _process.Free(_paramStructAllocation);
+
             _disposedValue = true;
         }
     }
@@ -126,7 +144,7 @@ public sealed class UDKRemote : IDisposable
     {
         using var stream = new MemoryStream();
         asm.Assemble(new StreamCodeWriter(stream), 0);
-        return AlignToMultiple((int)stream.Length, 512);
+        return AlignToMultiple((int)stream.Length, 256);
     }
 
     static byte[] BuildAssembly(Assembler asm, ulong rip)
@@ -139,34 +157,28 @@ public sealed class UDKRemote : IDisposable
     #endregion
 
 
-    /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread, extracting value from an internal output buffer.</summary>
-    /// <typeparam name="T">Type of the extracted return value.</typeparam>
-    /// <param name="returnValueSize">Number of bytes to allocate on .NET side for receiving a copy of the output buffer.</param>
+    /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread, without input or output data.</summary>
     /// <param name="writeAssemblyBody">Callback that generates body of code to execute.</param>
-    /// <param name="extractReturnValue">Callback that extracts a value from the output buffer (exactly <c>returnValueSize</c> bytes long).</param>
-    /// <returns>Extracted value.</returns>
-    public T Execute<T>(int returnValueSize, Action<Assembler> writeAssemblyBody, Func<byte[], T> extractReturnValue)
-    {
-        var returnBuffer = new byte[returnValueSize];
-        Execute(returnBuffer, writeAssemblyBody);
-        return extractReturnValue(returnBuffer);
-    }
-
-    /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread, without returning data.</summary>
-    /// <param name="writeAssemblyBody">Callback that generates body of code to execute.</param>
-    public void Execute(Action<Assembler> writeAssemblyBody)
-        => Execute([], writeAssemblyBody);
+    public void Execute(Action<Assembler> writeAssemblyBody) => Execute([], [], writeAssemblyBody);
 
     /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread.</summary>
-    /// <param name="returnValueBytes">Buffer which will receive a copy of data from the internal return value buffer.</param>
-    /// <param name="writeAssemblyBody">Callback that generates body of code to execute, with return buffer address available in rcx.</param>
-    public void Execute(Span<byte> returnValueBytes, Action<Assembler> writeAssemblyBody)
+    /// <param name="outputBuffer">Buffer which will receive a copy of data from the internal return value buffer.</param>
+    /// <param name="writeAssemblyBody">Callback that generates body of code to execute.</param>
+    public void Execute(ReadOnlySpan<byte> inputBuffer, Span<byte> outputBuffer, Action<Assembler> writeAssemblyBody)
     {
-        switch (returnValueBytes.Length)
+        if (inputBuffer.Length >= InputBufferSize) throw new ArgumentException("input buffer too large", nameof(inputBuffer));
+        if (outputBuffer.Length >= OutputBufferSize) throw new ArgumentException("output buffer too large", nameof(outputBuffer));
+
+        _process.WriteMemoryChecked(_inputBufferAllocation, _inputBufferZeros);
+        _process.WriteMemoryChecked(_outputBufferAllocation, _outputBufferZeros);
+
+
+        if (!inputBuffer.IsEmpty)
         {
-            case > ReturnBufferSize: throw new ArgumentException("return buffer too large", nameof(returnValueBytes));
-            case > 0: _process.WriteMemoryChecked(_returnValueAllocation, _returnValueZeroes); break;
+            // Copy input arguments to the process-side input buffer.
+            _process.WriteMemoryChecked(_inputBufferAllocation, inputBuffer);
         }
+
 
         Assembler localAssembler = new(64);
 
@@ -184,26 +196,67 @@ public sealed class UDKRemote : IDisposable
             _process.WriteMemoryChecked(allocatedBuffer, assembledBinary);
             _process.ProtectExecutable(allocatedBuffer, alignedLength);
 
-            var parameter = returnValueBytes.IsEmpty ? IntPtr.Zero : _returnValueAllocation;
-            var thread = _process.CreateThread(allocatedBuffer, parameter, out var id);
-            Debug.WriteLine($"created temporary thread with id = {id}");
+            var execThread = _process.CreateThread(allocatedBuffer, _paramStructAllocation, out _);
 
-            Windows.WaitForSingleObject(thread);
-            Windows.CloseHandle(thread);
+            Windows.WaitForSingleObject(execThread);
+            Windows.CloseHandle(execThread);
         }
         finally
         {
             _process.Free(allocatedBuffer);
         }
 
-        if (!returnValueBytes.IsEmpty)
+
+        if (!outputBuffer.IsEmpty)
         {
-            _process.ReadMemoryChecked(_returnValueAllocation, returnValueBytes);
+            // Extract bytes from the process-side output buffer.
+            _process.ReadMemoryChecked(_outputBufferAllocation, outputBuffer);
         }
     }
 
 
-    #region Memory reading.
+    #region Value allocation.
+
+    /// <summary>Looks up or inserts an <c>FName</c> by string.</summary>
+    /// <param name="value">String value.</param>
+    /// <param name="bSplitName">Whether to split number part from string <c>value</c>.</param>
+    /// <returns>An engine-provided <c>FName</c> instance.</returns>
+    public FName AllocName(string value, bool bSplitName = true)
+    {
+        byte[] inputBytes = new byte[Encoding.Unicode.GetMaxByteCount(value.Length) + 1];
+        Span<byte> outputBytes = stackalloc byte[FNameSize];
+
+        {
+            byte[] stringBytes = Encoding.Unicode.GetBytes(value);
+            Array.Fill<byte>(inputBytes, 0x00);
+            Array.Copy(stringBytes, inputBytes, stringBytes.Length);
+        }
+
+        Execute(inputBytes, outputBytes, (asm) =>
+        {
+            asm.mov(r12, __qword_ptr[rcx]);
+            asm.mov(r13, __qword_ptr[rcx + 8]);
+
+            asm.sub(rsp, 0x28);             // Reserve shadow space + 5th param.
+
+            asm.mov(rcx, r13);              // Output buffer as (this) pointer.
+            asm.mov(rdx, r12);              // Input buffer pointer as cw-string.
+            asm.mov(r8d, 0);                // Default instance number (0).
+            asm.mov(r9d, 1);                // FNAME_Add lookup mode.
+                                            // Number split flag.
+            asm.mov(__dword_ptr[rsp + 0x20], bSplitName ? 1 : 0);
+
+            asm.mov(rax, _addressFNameInit);
+            asm.call(rax);                  // Call FName::Init.
+        });
+
+        return new FName(outputBytes);
+    }
+
+    #endregion
+
+
+    #region Value reading.
 
     /// <summary>
     /// Reads <c>FArray</c> / <c>TArray</c> components.

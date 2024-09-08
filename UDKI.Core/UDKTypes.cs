@@ -58,6 +58,20 @@ public struct FName
 {
     public int EntryIndex;
     public int NumberPlusOne;
+
+    public FName()
+    {
+        // ...
+    }
+
+    public FName(ReadOnlySpan<byte> view)
+    {
+        if (view.Length < 8)
+            throw new ArgumentException("view too short", nameof(view));
+
+        EntryIndex = BinaryPrimitives.ReadInt32LittleEndian(view[0..4]);
+        NumberPlusOne = BinaryPrimitives.ReadInt32LittleEndian(view[4..8]);
+    }
 }
 
 /// <summary>
@@ -80,14 +94,14 @@ public struct FNameEntry
         // ...
     }
 
-    public FNameEntry(ReadOnlySpan<byte> entryView)
+    public FNameEntry(ReadOnlySpan<byte> view)
     {
-        if (entryView.Length < 20)
-            throw new ArgumentException("name entry view too short", nameof(entryView));
+        if (view.Length < 20)
+            throw new ArgumentException("view too short", nameof(view));
 
-        Flags = BinaryPrimitives.ReadUInt64LittleEndian(entryView[0..8]);
-        HashIndex = BinaryPrimitives.ReadInt32LittleEndian(entryView[8..12]);
-        HashNext = BinaryPrimitives.ReadIntPtrLittleEndian(entryView[12..20]);
+        Flags = BinaryPrimitives.ReadUInt64LittleEndian(view[0..8]);
+        HashIndex = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
+        HashNext = BinaryPrimitives.ReadIntPtrLittleEndian(view[12..20]);
     }
 }
 
