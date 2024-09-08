@@ -45,7 +45,7 @@ try
 
     foreach (var inputString in new string[] { "Test_907", "None_1", "Object", "IntProperty" })
     {
-        var outputName = remote.AllocName(inputString, bSplitName: true);
+        var outputName = remote.InitName(inputString, bSplitName: true);
         var outputString = remote.ReadName(outputName);
 
         println($"roundtrip for '{inputString}' name: '{outputString}' (number = {outputName.NumberPlusOne})");
@@ -55,13 +55,8 @@ try
     {
         var execThread = new Thread(() =>
         {
-            Span<byte> bytes = stackalloc byte[8];
-            remote.ReadArrayItem(remote.ResolveMainOffset(UDKOffsets.GObjObjects), 0, bytes);
-
-            IntPtr pointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes);
-            var @object = remote.ReadReflectedInstance<UObject>(pointer, generation);
-
-            println($"deserialized first object: {@object}");
+            var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation);
+            Debugger.Break();
         }, maxStackSize: 100 * 1024 * 1024);
 
         execThread.Start();

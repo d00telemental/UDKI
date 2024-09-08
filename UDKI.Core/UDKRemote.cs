@@ -35,6 +35,9 @@ public sealed class UDKRemote : IDisposable
     private readonly IntPtr _addressObjects;
     private readonly IntPtr _addressNames;
     private readonly IntPtr _addressFNameInit;
+    private readonly IntPtr _addressStaticFindObject;
+    private readonly IntPtr _addressStaticFindObjectFastInternal;
+    private readonly IntPtr _addressClassClass;
 
     /// <summary>Number of bytes allocated for internal parameters buffer.</summary>
     public const int InputBufferSize = 1024;
@@ -73,6 +76,9 @@ public sealed class UDKRemote : IDisposable
         _addressObjects = ResolveMainOffset(UDKOffsets.GObjObjects);
         _addressNames = ResolveMainOffset(UDKOffsets.Names);
         _addressFNameInit = ResolveMainOffset(0x268090);
+        _addressStaticFindObject = ResolveMainOffset(0x270520);
+        _addressStaticFindObjectFastInternal = ResolveMainOffset(0x270280);
+        _addressClassClass = ReadPointer(ResolveMainOffset(0x356D860));
     }
 
 
@@ -162,6 +168,7 @@ public sealed class UDKRemote : IDisposable
     public void Execute(Action<Assembler> writeAssemblyBody) => Execute([], [], writeAssemblyBody);
 
     /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread.</summary>
+    /// <param name="inputBuffer">Buffer which contains serialized parameters to copy into internal parameter buffer.</param>
     /// <param name="outputBuffer">Buffer which will receive a copy of data from the internal return value buffer.</param>
     /// <param name="writeAssemblyBody">Callback that generates body of code to execute.</param>
     public void Execute(ReadOnlySpan<byte> inputBuffer, Span<byte> outputBuffer, Action<Assembler> writeAssemblyBody)
@@ -215,42 +222,158 @@ public sealed class UDKRemote : IDisposable
     }
 
 
-    #region Value allocation.
+    #region Value allocation and search.
 
     /// <summary>Looks up or inserts an <c>FName</c> by string.</summary>
     /// <param name="value">String value.</param>
     /// <param name="bSplitName">Whether to split number part from string <c>value</c>.</param>
     /// <returns>An engine-provided <c>FName</c> instance.</returns>
-    public FName AllocName(string value, bool bSplitName = true)
+    public FName InitName(string value, bool bSplitName = true)
     {
-        byte[] inputBytes = new byte[Encoding.Unicode.GetMaxByteCount(value.Length) + 1];
-        Span<byte> outputBytes = stackalloc byte[FNameSize];
+        var valueBytes = Encoding.Unicode.GetBytes(value);
+
+        byte[] inputBuffer = new byte[valueBytes.Length + 2];
+        Span<byte> outputBuffer = stackalloc byte[FNameSize];
 
         {
-            byte[] stringBytes = Encoding.Unicode.GetBytes(value);
-            Array.Fill<byte>(inputBytes, 0x00);
-            Array.Copy(stringBytes, inputBytes, stringBytes.Length);
+            Array.Fill<byte>(inputBuffer, 0x00);
+            Array.Copy(valueBytes, inputBuffer, valueBytes.Length);
         }
 
-        Execute(inputBytes, outputBytes, (asm) =>
+        Execute(inputBuffer, outputBuffer, (asm) =>
         {
             asm.mov(r12, __qword_ptr[rcx]);
             asm.mov(r13, __qword_ptr[rcx + 8]);
 
-            asm.sub(rsp, 0x28);             // Reserve shadow space + 5th param.
+            asm.sub(rsp, 0x28);
 
-            asm.mov(rcx, r13);              // Output buffer as (this) pointer.
-            asm.mov(rdx, r12);              // Input buffer pointer as cw-string.
-            asm.mov(r8d, 0);                // Default instance number (0).
-            asm.mov(r9d, 1);                // FNAME_Add lookup mode.
-                                            // Number split flag.
+            asm.mov(rcx, r13);      // Output buffer as (this) pointer.
+            asm.mov(rdx, r12);      // Input buffer pointer as cw-string.
+            asm.mov(r8d, 0);        // Default instance number (0).
+            asm.mov(r9d, 1);        // Lookup mode (FNAME_Add).
             asm.mov(__dword_ptr[rsp + 0x20], bSplitName ? 1 : 0);
 
             asm.mov(rax, _addressFNameInit);
-            asm.call(rax);                  // Call FName::Init.
+            asm.call(rax);          // Call FName::Init.
         });
 
-        return new FName(outputBytes);
+        return new FName(outputBuffer);
+    }
+
+    /// <summary>Searches for a class by name.</summary>
+    /// <param name="className">Unscoped class name (without outer chain or class).</param>
+    /// <param name="bAllowDerived">Whether to allow subclasses.</param>
+    /// <returns>Pointer to a class object.</returns>
+    public IntPtr FindClass(string className, bool bAllowDerived = true)
+    {
+        FName objectName = InitName(className, false);
+        return FindObjectFastInternal(_addressClassClass, objectName, bAllowDerived, 0);
+    }
+
+    /// <summary>Searches for a class instance by name and deserializes it.</summary>
+    /// <param name="className">Unscoped class name (without outer chain or class).</param>
+    /// <param name="generation">Object serialization context.</param>
+    /// <returns>Deserialized class or <c>null</c>.</returns>
+    public UClass? FindClassTyped(string className, UDKGeneration generation)
+    {
+        IntPtr pointer = FindClass(className, bAllowDerived: true);
+        return ReadReflectedInstance<UClass>(pointer, generation);
+    }
+
+    /// <summary>Searches for an object by name (and optionally class).</summary>
+    /// <param name="fullName">Scoped object name (can contain class and outer chain).</param>
+    /// <param name="className">(Optional) name of the class that returned object must have.</param>
+    /// <param name="bAllowDerived">Whether to allow subclasses.</param>
+    /// <returns>Pointer to an object</returns>
+    public IntPtr FindObject(string fullName, string? className = null, bool bAllowDerived = true)
+    {
+        IntPtr classPointer = className is not null ? FindClass(className, bAllowDerived) : IntPtr.Zero;
+        return FindObjectInternal(classPointer, fullName, bAllowDerived);
+    }
+
+    /// <summary>Searches for an object by name (and optionally class) and deserializes it.</summary>
+    /// <typeparam name="T">Defined managed type for deserialization.</typeparam>
+    /// <param name="fullName">Scoped object name (can contain class and outer chain).</param>
+    /// <param name="generation">Object serialization context.</param>
+    /// <returns>Deserialized object or <c>null</c>.</returns>
+    public T? FindObjectTyped<T>(string fullName, UDKGeneration generation) where T : UObject
+    {
+        IntPtr pointer = FindObject(fullName, className: null, bAllowDerived: true);
+        return ReadReflectedInstance<T>(pointer, generation);
+    }
+
+    IntPtr FindObjectInternal(IntPtr classPointer, string objectFullName, bool bAllowDerived)
+    {
+        var stringBytes = Encoding.Unicode.GetBytes(objectFullName);
+
+        byte[] inputBuffer = new byte[12 + stringBytes.Length + 2];
+        Span<byte> outputBuffer = stackalloc byte[8];
+
+        {
+            Array.Fill<byte>(inputBuffer, 0x00);
+            Array.Copy(stringBytes, 0, inputBuffer, 12, stringBytes.Length);
+
+            BinaryPrimitives.WriteIntPtrLittleEndian(inputBuffer.AsSpan()[0..8], classPointer);
+            BinaryPrimitives.WriteInt32LittleEndian(inputBuffer.AsSpan()[8..12], bAllowDerived ? 0 : 1);
+        }
+
+        Execute(inputBuffer, outputBuffer, (asm) =>
+        {
+            asm.mov(r12, __qword_ptr[rcx]);         // Input buffer.
+            asm.mov(r13, __qword_ptr[rcx + 8]);     // Output buffer.
+
+            asm.sub(rsp, 0x20);
+
+            asm.mov(rcx, __qword_ptr[r12]);         // Class to search for.
+            asm.mov(rdx, -1);                       // "Any" outer package (magic value).
+            asm.lea(r8,  __qword_ptr[r12 + 12]);    // Object path as cw-string, within input buffer.
+            asm.mov(r9d, __dword_ptr[r12 + 8]);     // Whether the class match needs to be exact (not 'IsA').
+
+            asm.mov(rax, _addressStaticFindObject);
+            asm.call(rax);
+
+            asm.mov(__qword_ptr[r13], rax);
+        });
+
+        return BinaryPrimitives.ReadIntPtrLittleEndian(outputBuffer);
+    }
+
+    IntPtr FindObjectFastInternal(IntPtr classPointer, FName objectName, bool bAllowDerived, EObjectFlags excludeFlags)
+    {
+        Span<byte> inputBuffer = stackalloc byte[28];
+        Span<byte> outputBuffer = stackalloc byte[8];
+
+        {
+            BinaryPrimitives.WriteIntPtrLittleEndian(inputBuffer[0..8], classPointer);
+            BinaryPrimitives.WriteInt32LittleEndian(inputBuffer[8..12], objectName.EntryIndex);
+            BinaryPrimitives.WriteInt32LittleEndian(inputBuffer[12..16], objectName.NumberPlusOne);
+            BinaryPrimitives.WriteInt32LittleEndian(inputBuffer[16..20], bAllowDerived ? 0 : 1);
+            BinaryPrimitives.WriteUInt64LittleEndian(inputBuffer[20..28], (ulong)excludeFlags);
+        }
+
+        Execute(inputBuffer, outputBuffer, (asm) =>
+        {
+            asm.mov(r12, __qword_ptr[rcx]);         // Input buffer.
+            asm.mov(r13, __qword_ptr[rcx + 8]);     // Output buffer.
+
+            asm.sub(rsp, 0x30);
+
+            asm.mov(rcx, __qword_ptr[r12]);         // Class to search for.
+            asm.mov(rdx, 0);                        // Outer package.
+            asm.mov(r8, __qword_ptr[r12 + 8]);      // Object name, this is our primary query.
+            asm.mov(r9d, __dword_ptr[r12 + 16]);    // Whether the class match needs to be exact (not 'IsA').
+            asm.mov(__dword_ptr[rsp + 0x20], 1);    // Whether "any package" would do (must be TRUE to accommodate the null package pointer).
+
+            asm.mov(rax, __qword_ptr[r12 + 20]);
+            asm.mov(__qword_ptr[rsp + 0x24], rax);  // Flags to filter out sought-for objects.
+
+            asm.mov(rax, _addressStaticFindObjectFastInternal);
+            asm.call(rax);
+
+            asm.mov(__qword_ptr[r13], rax);
+        });
+
+        return BinaryPrimitives.ReadIntPtrLittleEndian(outputBuffer);
     }
 
     #endregion
@@ -263,7 +386,7 @@ public sealed class UDKRemote : IDisposable
     /// </summary>
     public FArray ReadArray(IntPtr address)
     {   
-        var arrayView = new byte[FArraySize];
+        Span<byte> arrayView = stackalloc byte[FArraySize];
         _process.ReadMemoryChecked(address, arrayView);
         return new FArray(arrayView);
     }
@@ -366,6 +489,18 @@ public sealed class UDKRemote : IDisposable
         FNameEntry entry = ReadNameEntry(name.EntryIndex);
         if (entry.Text is null) throw new InvalidDataException("invalid entry index");
         return name.NumberPlusOne == 0 ? entry.Text : $"{entry.Text}_{name.NumberPlusOne - 1}";
+    }
+
+    public IntPtr ReadPointer(IntPtr address, bool bCheckNull = false)
+    {
+        Span<byte> bytes = stackalloc byte[IntPtr64Size];
+        _process.ReadMemoryChecked(address, bytes);
+
+        var pointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes);
+        if (bCheckNull && pointer == IntPtr.Zero)
+            throw new InvalidDataException($"null pointer at {address}");
+
+        return pointer;
     }
 
     #endregion
@@ -528,19 +663,41 @@ public sealed class UDKRemote : IDisposable
             if (fieldPointer == IntPtr.Zero) return null;
 
             var fieldValue = ReadReflectedInstance(valueType, fieldPointer, arrayIndex, cache, depth + 1);
-            var classAttribute = Attribute.GetCustomAttribute(fieldValue.GetType(), typeof(UClassAttribute)) as UClassAttribute;
+            var classAttribute = Attribute.GetCustomAttribute(fieldValue!.GetType(), typeof(UClassAttribute)) as UClassAttribute;
 
-            if (CheckNeedsDowncast(fieldPointer, fieldValue, fieldInfo, arrayIndex, objectInstance, classAttribute!, out Type lowerType))
+            if (CheckNeedsDowncast(fieldPointer, fieldValue!, fieldInfo, arrayIndex, objectInstance, classAttribute!, out Type lowerType))
                 fieldValue = ReadReflectedInstance(lowerType, fieldPointer, arrayIndex, cache, depth + 1);
 
             return fieldValue;
         }
 
+        if (valueType.IsEnum)
+        {
+            var enumBaseType = Enum.GetUnderlyingType(valueType);
+
+            if (enumBaseType == typeof(uint))
+            {
+                var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(uint));
+                var fieldInteger = BinaryPrimitives.ReadUInt32LittleEndian(fieldSlice);
+                return Enum.ToObject(valueType, fieldInteger);
+            }
+
+            if (enumBaseType == typeof(ulong))
+            {
+                var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(ulong));
+                var fieldInteger = BinaryPrimitives.ReadUInt64LittleEndian(fieldSlice);
+                return Enum.ToObject(valueType, fieldInteger);
+            }
+        }
+
         throw new ArgumentException($"value reading for {valueType.FullName} is not implemented", nameof(fieldInfo));
     }
 
-    object ReadReflectedInstance(Type type, IntPtr address, int? arrayIndex, Dictionary<IntPtr, object> cache, uint depth)
+    object? ReadReflectedInstance(Type type, IntPtr address, int? arrayIndex, Dictionary<IntPtr, object> cache, uint depth)
     {
+        if (address == IntPtr.Zero)
+            return null;
+
         if (cache.TryGetValue(address, out object? saved) && !type.IsSubclassOf(saved!.GetType()))
         {
             // Generally, we would like to avoid recursive re-deserialization of same instances.
@@ -643,10 +800,16 @@ public sealed class UDKRemote : IDisposable
     /// <param name="address">Remote source pointer (as an absolute offset).</param>
     /// <param name="generation">Generation which should be used for instance tree caching.</param>
     /// <returns>Deserialized object.</returns>
-    public T ReadReflectedInstance<T>(IntPtr address, UDKGeneration generation)
+    public T? ReadReflectedInstance<T>(IntPtr address, UDKGeneration generation)
     {
         _postfixes.Clear();
-        var instance = (T)ReadReflectedInstance(typeof(T), address, null, generation.Instances, 0);
+        var instance = (T?)ReadReflectedInstance(typeof(T), address, null, generation.Instances, 0);
+
+        if (instance is null)
+        {
+            _postfixes.Clear();
+            return default;
+        }
 
         // We need to apply postfixes here to handle some recursion edge cases
         // where UObject-derived instance is correctly re-serialized with a lower-derived

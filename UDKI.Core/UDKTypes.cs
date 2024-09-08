@@ -6,6 +6,8 @@ using System.Text;
 namespace UDKI.Core;
 
 
+#region Core structs.
+
 /// <summary>
 /// Structure of an Unreal <c>FArray</c> / <c>TArray</c>, compatible with in-memory layout.
 /// It is annotated with a "sequential" layout to allow marshalling it via native .NET utilities.
@@ -105,6 +107,198 @@ public struct FNameEntry
     }
 }
 
+#endregion
+
+
+#region Enumerations.
+
+[Flags]
+public enum EObjectFlags : ulong
+{
+    InSingularFunc = 0x0000000000000002,
+    StateChanged = 0x0000000000000004,
+    DebugPostLoad = 0x0000000000000008,
+    DebugSerialize = 0x0000000000000010,
+    DebugFinishDestroyed = 0x0000000000000020,
+    EditorSelected = 0x0000000000000040,
+    ZombieComponent = 0x0000000000000080,
+    Protected = 0x0000000000000100,
+    ClassDefaultObject = 0x0000000000000200,
+    ArchetypeObject = 0x0000000000000400,
+    ForceTagExport = 0x0000000000000800,
+    TokenStreamAssembled = 0x0000000000001000,
+    MisalignedObject = 0x0000000000002000,
+    RootSet = 0x0000000000004000,
+    BeginDestroy = 0x0000000000008000,
+    FinishDestroy = 0x0000000000010000,
+    DebugBeginDestroyed = 0x0000000000020000,
+    MarkedByCooker = 0x0000000000040000,
+    LocalizedResource = 0x0000000000080000,
+    InitializedProperties = 0x0000000000100000,
+    PendingFieldPatches = 0x0000000000200000,
+    CrossLevelReferenced = 0x0000000000400000,
+    Saved = 0x0000000080000000,
+    Transactional = 0x0000000100000000,
+    Unreachable = 0x0000000200000000,
+    Public = 0x0000000400000000,
+    TagImport = 0x0000000800000000,
+    TagExport = 0x0000001000000000,
+    Obsolete = 0x0000002000000000,
+    TagGarbage = 0x0000004000000000,
+    DisregardForGC = 0x0000008000000000,
+    PerObjectLocalized = 0x0000010000000000,
+    NeedLoading = 0x0000020000000000,
+    AsyncLoading = 0x0000040000000000,
+    Suppress = 0x0000100000000000,
+    InEndState = 0x0000200000000000,
+    Transient = 0x0000400000000000,
+    Cooked = 0x0000800000000000,
+    LoadForClient = 0x0001000000000000,
+    LoadForServer = 0x0002000000000000,
+    LoadForEdit = 0x0004000000000000,
+    Standalone = 0x0008000000000000,
+    NotForClient = 0x0010000000000000,
+    NotForServer = 0x0020000000000000,
+    NotForEdit = 0x0040000000000000,
+    NeedPostLoad = 0x0100000000000000,
+    WithStack = 0x0200000000000000,
+    Native = 0x0400000000000000,
+    Marked = 0x0800000000000000,
+    ErrorShutdown = 0x1000000000000000,
+    PendingKill = 0x2000000000000000,
+    CookedStartupObject = 0x8000000000000000,
+}
+
+[Flags]
+public enum EClassFlags : uint
+{
+    None = 0x00000000,
+    Abstract = 0x00000001,
+    Compiled = 0x00000002,
+    Config = 0x00000004,
+    Transient = 0x00000008,
+    Parsed = 0x00000010,
+    Localized = 0x00000020,
+    SafeReplace = 0x00000040,
+    Native = 0x00000080,
+    NoExport = 0x00000100,
+    Placeable = 0x00000200,
+    PerObjectConfig = 0x00000400,
+    NativeReplication = 0x00000800,
+    EditInlineNew = 0x00001000,
+    CollapseCategories = 0x00002000,
+    Interface = 0x00004000,
+
+    IsProperty = 0x00008000,
+    IsObjectProperty = 0x00010000,
+    IsBoolProperty = 0x00020000,
+    IsState = 0x00040000,
+    IsFunction = 0x00080000,
+    IsStructProperty = 0x00100000,
+
+    HasInstancedProperties = 0x00200000,
+    NeedsDefaultProperties = 0x00400000,
+    Hidden = 0x01000000,
+    Deprecated = 0x02000000,
+    HideDropDown = 0x04000000,
+    Exported = 0x08000000,
+    Intrinsic = 0x10000000,
+    NativeOnly = 0x20000000,
+    PerObjectLocalized = 0x40000000,
+    HasCrossLevelReferences = 0x80000000,
+}
+
+[Flags]
+public enum EPropertyFlags : ulong
+{
+    Edit = 0x0000000000000001,
+    Const = 0x0000000000000002,
+    Input = 0x0000000000000004,
+    ExportObject = 0x0000000000000008,
+    OptionalParam = 0x0000000000000010,
+    Net = 0x0000000000000020,
+    EditFixedSize = 0x0000000000000040,
+    Param = 0x0000000000000080,
+    OutParam = 0x0000000000000100,
+    SkipParam = 0x0000000000000200,
+    ReturnParam = 0x0000000000000400,
+    CoerceParam = 0x0000000000000800,
+    Native = 0x0000000000001000,
+    Transient = 0x0000000000002000,
+    Config = 0x0000000000004000,
+    Localized = 0x0000000000008000,
+    EditConst = 0x0000000000020000,
+    GlobalConfig = 0x0000000000040000,
+    Component = 0x0000000000080000,
+    AlwaysInit = 0x0000000000100000,
+    DuplicateTransient = 0x0000000000200000,
+    NeedsCtorLink = 0x0000000000400000,
+    NoExport = 0x0000000000800000,
+    NoImport = 0x0000000001000000,
+    NoClear = 0x0000000002000000,
+    EditInline = 0x0000000004000000,
+    EditInlineUse = 0x0000000010000000,
+    Deprecated = 0x0000000020000000,
+    DataBinding = 0x0000000040000000,
+    SerializeText = 0x0000000080000000,
+    RepNotify = 0x0000000100000000,
+    Interp = 0x0000000200000000,
+    NonTransact = 0x0000000400000000,
+    EditorOnly = 0x0000000800000000,
+    NotForConsole = 0x0000001000000000,
+    RepRetry = 0x0000002000000000,
+    PrivateWrite = 0x0000004000000000,
+    ProtectedWrite = 0x0000008000000000,
+    ArchetypeProperty = 0x0000010000000000,
+    EditorHide = 0x0000020000000000,
+    EditorTextBox = 0x0000040000000000,
+    CrossLevelPassive = 0x0000100000000000,
+    CrossLevelActive = 0x0000200000000000,
+}
+
+[Flags]
+public enum EStateFlags : uint
+{
+    Editable = 0x00000001,
+    Automatic = 0x00000002,
+    Simulated = 0x00000004,
+    HasLocals = 0x00000008,
+}
+
+[Flags]
+public enum EFunctionFlags : uint
+{
+    Final = 0x00000001,
+    Defined = 0x00000002,
+    Iterator = 0x00000004,
+    Latent = 0x00000008,
+    PrefixOperator = 0x00000010,
+    Singular = 0x00000020,
+    Net = 0x00000040,
+    NetReliable = 0x00000080,
+    Simulated = 0x00000100,
+    Exec = 0x00000200,
+    Native = 0x00000400,
+    Event = 0x00000800,
+    Operator = 0x00001000,
+    Static = 0x00002000,
+    HasOptionalParams = 0x00004000,
+    Const = 0x00008000,
+    Public = 0x00020000,
+    Private = 0x00040000,
+    Protected = 0x00080000,
+    Delegate = 0x00100000,
+    NetServer = 0x00200000,
+    HasOutParams = 0x00400000,
+    HasDefaults = 0x00800000,
+    NetClient = 0x01000000,
+    DllImport = 0x02000000,
+}
+
+#endregion
+
+
+#region UObject hierarchy.
 
 [UClass("Object", fixedSize: 0x60)]
 public class UObject
@@ -112,7 +306,7 @@ public class UObject
     [UField("VfTableObject", 0x00)]
     public IntPtr VfTableObject;
     [UField("ObjectFlags", 0x10)]
-    public ulong ObjectFlags;
+    public EObjectFlags ObjectFlags;
     [UField("StateFrame", 0x20)]
     public IntPtr StateFrame;
     [UField("Index", 0x38)]
@@ -141,6 +335,12 @@ public class UObject
             {
                 if (Outer!.Outer!.Outer is not null)
                 {
+                    if (Outer!.Outer!.Outer!.Outer is not null)
+                    {
+                        builder.Append(Outer!.Outer!.Outer!.Outer!.Name);
+                        builder.Append('.');
+                    }
+
                     builder.Append(Outer!.Outer!.Outer!.Name);
                     builder.Append('.');
                 }
@@ -183,7 +383,7 @@ public class UState : UStruct
     [UField("ProbeMask", 0xD0)]
     public uint ProbeMask;
     [UField("StateFlags", 0xD4)]
-    public uint StateFlags;
+    public EStateFlags StateFlags;
     [UField("LabelTableOffset", 0xD8)]
     public uint LabelTableOffset;
 }
@@ -192,7 +392,7 @@ public class UState : UStruct
 public class UClass : UState
 {
     [UField("ClassFlags", 0x124)]
-    public uint ClassFlags;
+    public EClassFlags ClassFlags;
     [UField("ClassCastFlags", 0x128)]
     public uint ClassCastFlags;
     [UField("ClassUnique", 0x12C)]
@@ -221,7 +421,7 @@ public class UClass : UState
 public class UFunction : UStruct
 {
     [UField("FunctionFlags", 0xD0)]
-    public uint FunctionFlags;
+    public EFunctionFlags FunctionFlags;
     [UField("iNative", 0xD4)]
     public ushort iNative;
     [UField("RepOffset", 0xD6)]
@@ -271,7 +471,7 @@ public class UProperty : UField
     [UField("ElementSize", 0x6C)]
     public int ElementSize;
     [UField("PropertyFlags", 0x70)]
-    public ulong PropertyFlags;
+    public EPropertyFlags PropertyFlags;
     [UField("RepOffset", 0x78)]
     public ushort RepOffset;
     [UField("RepIndex", 0x7A)]
@@ -380,3 +580,5 @@ public class UMapProperty : UProperty
     [UField("Value", 0xB0)]
     public UProperty? Value;
 }
+
+#endregion
