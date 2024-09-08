@@ -39,13 +39,20 @@ try
     using var remote = new UDKRemote(process);
     println($"established remote connection");
 
+
     using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: false))
     {
-        Span<byte> bytes = stackalloc byte[8];
-        remote.ReadArrayItem(remote.ResolveMainOffset(UDKOffsets.GObjObjects), 0, bytes);
+        var execThread = new Thread(() =>
+        {
+            Span<byte> bytes = stackalloc byte[8];
+            remote.ReadArrayItem(remote.ResolveMainOffset(UDKOffsets.GObjObjects), 0, bytes);
 
-        IntPtr pointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes);
-        var @object = remote.ReadReflectedInstance<UObject>(pointer, generation);
+            IntPtr pointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes);
+            var @object = remote.ReadReflectedInstance<UObject>(pointer, generation);
+        }, maxStackSize: 100 * 1024 * 1024);
+
+        execThread.Start();
+        execThread.Join();
     }
 }
 catch (WindowsException exception) when (!IS_DEBUG)

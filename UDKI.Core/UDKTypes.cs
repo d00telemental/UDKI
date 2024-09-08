@@ -1,4 +1,5 @@
 ﻿using System.Buffers.Binary;
+using System.Data;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -73,12 +74,29 @@ public struct FNameEntry
     public string? Text;
 
     public readonly bool IsNull => Text is null;
+
+    public FNameEntry()
+    {
+        // ...
+    }
+
+    public FNameEntry(ReadOnlySpan<byte> entryView)
+    {
+        if (entryView.Length < 20)
+            throw new ArgumentException("name entry view too short", nameof(entryView));
+
+        Flags = BinaryPrimitives.ReadUInt64LittleEndian(entryView[0..8]);
+        HashIndex = BinaryPrimitives.ReadInt32LittleEndian(entryView[8..12]);
+        HashNext = BinaryPrimitives.ReadIntPtrLittleEndian(entryView[12..20]);
+    }
 }
 
 
 [UClass("Object", fixedSize: 0x60)]
 public class UObject
 {
+    [UField("VfTableObject", 0x00)]
+    public IntPtr VfTableObject;
     [UField("ObjectFlags", 0x10)]
     public ulong ObjectFlags;
     [UField("StateFrame", 0x20)]
@@ -159,7 +177,30 @@ public class UState : UStruct
 [UClass("Class", fixedSize: 0x280)]
 public class UClass : UState
 {
-    // ...
+    [UField("ClassFlags", 0x124)]
+    public uint ClassFlags;
+    [UField("ClassCastFlags", 0x128)]
+    public uint ClassCastFlags;
+    [UField("ClassUnique", 0x12C)]
+    public uint ClassUnique;
+    [UField("ClassWithin", 0x130)]
+    public UClass? ClassWithin;
+    [UField("ClassConfigName", 0x138, AsFName = true)]
+    public string ClassConfigName = string.Empty;
+    [UField("NetFields", 0x150)]
+    public UField[]? NetFields;
+    [UField("ClassHeaderFilename", 0x1C4)]
+    public string ClassHeaderFilename = string.Empty;
+    [UField("ClassDefaultObject", 0x1E4)]
+    public UObject? ClassDefaultObject;
+    [UField("ClassConstructor", 0x1EC)]
+    public IntPtr ClassConstructor;
+    [UField("ClassStaticConstructor", 0x1F4)]
+    public IntPtr ClassStaticConstructor;
+    [UField("ClassStaticInitializer", 0x1FC)]
+    public IntPtr ClassStaticInitializer;
+    [UField("DefaultPropText", 0x25C)]
+    public string DefaultPropText = string.Empty;
 }
 
 [UClass("Function", fixedSize: 0x100)]

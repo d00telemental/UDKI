@@ -23,7 +23,7 @@ public sealed class UDKRemote : IDisposable
     /// </summary>
     private readonly UDKGeneration _generation;
 
-    internal record struct PostfixRecord(object Outer, FieldInfo Field, Type type, nint Address, int? ArrayIndex);
+    internal record struct PostfixRecord(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
     private readonly HashSet<PostfixRecord> _postfixes;
 
     private readonly ArrayPool<byte> _objectMemoryPool;
@@ -169,7 +169,7 @@ public sealed class UDKRemote : IDisposable
     /// </summary>
     public FArray ReadArray(IntPtr address)
     {   
-        Span<byte> arrayView = stackalloc byte[FArraySize];
+        var arrayView = new byte[FArraySize];
         _process.ReadMemoryChecked(address, arrayView);
         return new FArray(arrayView);
     }
@@ -220,17 +220,12 @@ public sealed class UDKRemote : IDisposable
     /// <param name="address">Absolute address of the entry.</param>
     public FNameEntry ReadNameEntry(IntPtr address)
     {
-        Span<byte> metaView = stackalloc byte[32];
+        var metaView = new byte[20];
 
         _stream.Seek(address, SeekOrigin.Begin);
-        _stream.ReadExactly(metaView[..20]);
+        _stream.ReadExactly(metaView);
 
-        FNameEntry entry = new()
-        {
-            Flags = BinaryPrimitives.ReadUInt64LittleEndian(metaView[0..8]),
-            HashIndex = BinaryPrimitives.ReadInt32LittleEndian(metaView[8..12]),
-            HashNext = (IntPtr)BinaryPrimitives.ReadUInt64LittleEndian(metaView[12..20]),
-        };
+        var entry = new FNameEntry(metaView);
 
         bool bWideChars = (entry.HashIndex & 1) != 0;
         entry.HashIndex >>= 1;
@@ -570,15 +565,22 @@ public sealed class UDKRemote : IDisposable
         {
             var value = ReadReflectedInstance(type, pointer, index, generation.Instances, 0);
 
-            if (index is not null)
+            if (index is null)
             {
-                Debug.WriteLine($"postfix skipped for {field.Name}[{index!}]");
-                continue;
+                // Instance needs to go directly to a reflected field.
+                field.SetValue(outer, value);
+            }
+            else
+            {
+                // Instance needs to be propagated to an item within a reflected array field.
+                Debug.WriteLine($"applying postfix to {field.Name}[{index!}]");
+                var array = (Array)field.GetValue(outer)!;
+                array.SetValue(value, index.Value!);
             }
 
-            field.SetValue(outer, value);
         }
 
+        _postfixes.Clear();
         return instance;
     }
 }
