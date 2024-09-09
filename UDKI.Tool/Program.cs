@@ -1,11 +1,7 @@
-﻿using System.Buffers.Binary;
+﻿using System.ComponentModel;
 using System.Diagnostics;
 
-using Iced.Intel;
-using static Iced.Intel.AssemblerRegisters;
-
 using UDKI.Core;
-using System.ComponentModel;
 
 
 #region Textual i/o utilities.
@@ -30,11 +26,13 @@ var queryln = (string text) =>
 
 #endregion
 
+
 #if DEBUG
 bool IS_DEBUG = true;
 #else
 bool IS_DEBUG = false;
 #endif
+
 
 try
 {
@@ -44,24 +42,13 @@ try
     using var remote = new UDKRemote(process);
     println($"established remote connection");
 
-    foreach (var inputString in new string[] { "Test_907", "None_1", "Object", "IntProperty" })
+    using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: false))
     {
-        var outputName = remote.InitName(inputString, bSplitName: true);
-        var outputString = remote.ReadName(outputName);
+        //var @object = remote.FindObjectTyped<UObject>("Class'Field'", generation);
+        var @object = remote.FindObjectTyped<UObject>("Console'UTConsole_5'", generation);
 
-        println($"roundtrip for '{inputString}' name: '{outputString}' (number = {outputName.NumberPlusOne})");
-    }
-
-    using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: true))
-    {
-        var execThread = new Thread(() =>
-        {
-            var console = remote.FindObjectTyped<UObject>("Console'UTConsole_1'", generation);
-            Debugger.Break();
-        }, maxStackSize: 100 * 1024 * 1024);
-
-        execThread.Start();
-        execThread.Join();
+        Debug.Assert(@object is not null);
+        Debugger.Break();
     }
 }
 catch (Win32Exception exception) when (!IS_DEBUG)

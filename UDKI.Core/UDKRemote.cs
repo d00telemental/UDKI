@@ -1,4 +1,5 @@
-﻿using System.Buffers;
+﻿using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -20,8 +21,7 @@ public sealed class UDKRemote : IDisposable
     private readonly BufferedStream _stream;
     private readonly UDKGeneration _generation;
 
-    internal record struct PostfixRecord(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
-    private readonly HashSet<PostfixRecord> _postfixes;
+    internal record struct RefQueueItem(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
 
     private readonly IntPtr _inputBufferAllocation;
     private readonly byte[] _inputBufferZeros;
@@ -54,7 +54,6 @@ public sealed class UDKRemote : IDisposable
         _process = process;
         _stream = new(new ProcessMemoryStream(_process), StreamBufferSize);
         _generation = new(_process, freezeThreads: false);
-        _postfixes = [];
 
         _inputBufferAllocation = _process.Alloc(InputBufferSize);
         _inputBufferZeros = new byte[InputBufferSize];
@@ -294,7 +293,7 @@ public sealed class UDKRemote : IDisposable
     /// <returns>Deserialized object or <c>null</c>.</returns>
     public T? FindObjectTyped<T>(string fullName, UDKGeneration generation) where T : UObject
     {
-        IntPtr pointer = FindObject(fullName, className: null, bAllowDerived: true);
+        IntPtr pointer = FindObject(fullName, className: null, bAllowDerived: false);
         return ReadReflectedInstance<T>(pointer, generation);
     }
 
@@ -525,7 +524,7 @@ public sealed class UDKRemote : IDisposable
     }
 
     object? ReadReflectedField(ReadOnlySpan<byte> sourceBytes, object objectInstance, int? arrayIndex,
-        FieldInfo fieldInfo, UFieldAttribute fieldAttribute, Dictionary<IntPtr, object> cache, uint depth)
+        FieldInfo fieldInfo, UFieldAttribute fieldAttribute, Dictionary<IntPtr, object> cache, Queue<RefQueueItem> refQueue)
     {
         var valueType = fieldInfo.FieldType;
         var valueOffset = fieldAttribute.FixedOffset;
@@ -644,7 +643,7 @@ public sealed class UDKRemote : IDisposable
 
                 _process.ReadMemoryChecked(itemOffset, itemBuffer);
 
-                var itemValue = ReadReflectedField(itemBuffer, objectInstance, i, fieldInfo, fieldAttribute, cache, depth + 1);
+                var itemValue = ReadReflectedField(itemBuffer, objectInstance, i, fieldInfo, fieldAttribute, cache, refQueue);
                 fieldValue.SetValue(itemValue, i);
             }
 
@@ -656,15 +655,14 @@ public sealed class UDKRemote : IDisposable
             var fieldSlice = sourceBytes.Slice(valueOffset, IntPtr64Size);
             var fieldPointer = BinaryPrimitives.ReadIntPtrLittleEndian(fieldSlice);
 
-            if (fieldPointer == IntPtr.Zero) return null;
+            if (fieldPointer != IntPtr.Zero)
+            {
+                // To avoid recursion hundreds of levels deep, we just push this site to the queue,
+                // and top-level object reading function will iterate it until there are no references left.
+                refQueue.Enqueue(new RefQueueItem(objectInstance, fieldInfo, valueType, fieldPointer, arrayIndex));
+            }
 
-            var fieldValue = ReadReflectedInstance(valueType, fieldPointer, arrayIndex, cache, depth + 1);
-            var classAttribute = Attribute.GetCustomAttribute(fieldValue!.GetType(), typeof(UClassAttribute)) as UClassAttribute;
-
-            if (CheckNeedsDowncast(fieldPointer, fieldValue!, fieldInfo, arrayIndex, objectInstance, classAttribute!, out Type lowerType))
-                fieldValue = ReadReflectedInstance(lowerType, fieldPointer, arrayIndex, cache, depth + 1);
-
-            return fieldValue;
+            return null;
         }
 
         if (valueType.IsEnum)
@@ -689,10 +687,17 @@ public sealed class UDKRemote : IDisposable
         throw new ArgumentException($"value reading for {valueType.FullName} is not implemented", nameof(fieldInfo));
     }
 
-    object? ReadReflectedInstance(Type type, IntPtr address, int? arrayIndex, Dictionary<IntPtr, object> cache, uint depth)
+    object? ReadReflectedInstanceInternal(Type type, IntPtr address, int? arrayIndex,
+        Dictionary<IntPtr, object> cache, Queue<RefQueueItem> refQueue, out UClassAttribute classAttribute)
     {
         if (address == IntPtr.Zero)
+        {
+            classAttribute = new(string.Empty, 0);
             return null;
+        }
+
+        classAttribute = Attribute.GetCustomAttribute(type, typeof(UClassAttribute)) as UClassAttribute
+            ?? throw new InvalidOperationException($"type {type.Name} is not reflected");
 
         if (cache.TryGetValue(address, out object? saved) && !type.IsSubclassOf(saved!.GetType()))
         {
@@ -700,9 +705,6 @@ public sealed class UDKRemote : IDisposable
             // However when deserializing an instance cached with a higher type, we want to update it.
             return saved;
         }
-
-        var classAttribute = Attribute.GetCustomAttribute(type, typeof(UClassAttribute)) as UClassAttribute
-            ?? throw new InvalidOperationException($"type {type.Name} is not reflected");
 
         var objectBytes = _objectMemoryPool.Rent(classAttribute.FixedSize);
         _process.ReadMemoryChecked(address, objectBytes.AsSpan()[..classAttribute.FixedSize]);
@@ -715,41 +717,63 @@ public sealed class UDKRemote : IDisposable
             // Fields on reflected types are allowed to not be reflected.
             if (fieldInfo.GetCustomAttribute(typeof(UFieldAttribute)) is UFieldAttribute fieldAttribute)
             {
-                var fieldValue = ReadReflectedField(objectBytes, objectInstance, null, fieldInfo, fieldAttribute, cache, depth);
+                var fieldValue = ReadReflectedField(objectBytes, objectInstance, null, fieldInfo, fieldAttribute, cache, refQueue);
                 fieldInfo.SetValueDirect(__makeref(objectInstance), fieldValue!);
             }
         }
 
         _objectMemoryPool.Return(objectBytes, clearArray: true);
-
-        if (CheckNeedsDowncast(IntPtr.Zero, null, null, arrayIndex, objectInstance, classAttribute, out Type lowerType))
-        {
-            // If we detect a sliced UObject read, re-serialize the instance with a derived type.
-            // This is horribly inefficient but we want to pull in all the descendants we can reach.
-            objectInstance = ReadReflectedInstance(lowerType, address, arrayIndex, cache, depth);
-        }
-
         return objectInstance;
     }
 
-    bool CheckNeedsDowncast(IntPtr fieldPointer, object? fieldInstance, FieldInfo? fieldInfo, int? arrayIndex,
-        object outerInstance, UClassAttribute classAttribute, out Type lowerType)
+    object? ReadReflectedInstance(Type type, IntPtr address, UDKGeneration generation, Queue<RefQueueItem> refQueue)
     {
-        if (fieldInstance is UObject @object)
-        {
-            string? className = @object.Class?.Name;
+        var instance = ReadReflectedInstanceInternal(type, address, null, generation.Instances, refQueue, out var classAttribute);
+        if (instance is null) return default;
 
-            if (className is null && fieldInfo is not null)
+        while (refQueue.TryDequeue(out RefQueueItem item))
+        {
+            var (outer, field, qtype, pointer, index) = item;
+            var valueInstance = ReadReflectedInstanceInternal(qtype, pointer, index, generation.Instances, refQueue, out var valueClassAttribute);
+
+            if (valueInstance is null) continue;
+
+            if (CheckNeedsDowncast(valueInstance, valueClassAttribute.Name, out Type valueLowerType))
             {
-                // If UObject.Class or its name are null, we're 99.9% dealing with a sliced read which will
-                // fail to propagate to the outer field instance correctly... So just store enough things to pull
-                // the correctly-typed instance from cache at a later point.
-                _postfixes.Add(new PostfixRecord(outerInstance, fieldInfo!, fieldInstance!.GetType(), fieldPointer, arrayIndex));
+                refQueue.Enqueue(new RefQueueItem(outer, field, valueLowerType, pointer, index));
+                continue;
             }
 
-            if (classAttribute.Name != className && !string.IsNullOrEmpty(className))
+            if (index is null)
             {
-                Type? lowerTypeChecked = className switch
+                // Instance needs to go directly to a reflected field.
+                field.SetValue(outer, valueInstance);
+            }
+            else
+            {
+                // Instance needs to be propagated to an item within a reflected array field.
+                var array = (Array)field.GetValue(outer)!;
+                array.SetValue(valueInstance, index.Value!);
+            }
+
+            if (CheckNeedsRevisit(valueInstance, valueClassAttribute.Name, out valueLowerType))
+                refQueue.Enqueue(new RefQueueItem(outer, field, valueLowerType, pointer, index));
+        }
+
+        if (CheckNeedsDowncast(instance, classAttribute.Name, out var lowerType))
+            return ReadReflectedInstance(lowerType, address, generation, refQueue);
+
+        return instance;
+    }
+
+    static bool CheckNeedsDowncast(object checkedInstance, string staticClassName, out Type lowerType)
+    {
+        if (checkedInstance is UObject @object)
+        {
+            string? realClassName = @object.Class?.Name;
+            if (staticClassName != realClassName && !string.IsNullOrEmpty(realClassName))
+            {
+                Type? lowerTypeChecked = realClassName switch
                 {
                     "Field" => typeof(UField),
                     "Struct" => typeof(UStruct),
@@ -776,7 +800,7 @@ public sealed class UDKRemote : IDisposable
                     _ => null,
                 };
 
-                if (lowerTypeChecked?.IsSubclassOf(fieldInstance.GetType()) ?? false)
+                if (lowerTypeChecked?.IsSubclassOf(checkedInstance.GetType()) ?? false)
                 {
                     lowerType = lowerTypeChecked;
                     return true;
@@ -788,50 +812,34 @@ public sealed class UDKRemote : IDisposable
         return false;
     }
 
+    static bool CheckNeedsRevisit(object checkedInstance, string staticClassName, out Type lowerType)
+    {
+        if (checkedInstance is UObject @object && @object.Class is null)
+        {
+            lowerType = @object.GetType();
+            return true;
+        }
+
+        lowerType = typeof(void);
+        return false;
+    }
+
     #endregion
 
 
+    /// <summary>Deserializes an instance of a reflected type passed as a <see cref="Type"/> value.</summary>
+    /// <param name="type">Type value annotated with reflection attributes (<see cref="UClassAttribute"/>, <see cref="UFieldAttribute"/>).</param>
+    /// <param name="address">Remote object pointer (as an absolute offset).</param>
+    /// <param name="generation">Object serialization context.</param>
+    /// <returns>Deserialized <see cref="object"/>.</returns>
+    public object? ReadReflectedInstance(Type type, IntPtr address, UDKGeneration generation)
+        => ReadReflectedInstance(type, address, generation, []);
+
     /// <summary>Deserializes an instance of a reflected type.</summary>
     /// <typeparam name="T">Destination type, must be annotated with <see cref="UClassAttribute"/>.</typeparam>
-    /// <param name="address">Remote source pointer (as an absolute offset).</param>
-    /// <param name="generation">Generation which should be used for instance tree caching.</param>
-    /// <returns>Deserialized object.</returns>
+    /// <param name="address">Remote object pointer (as an absolute offset).</param>
+    /// <param name="generation">Object serialization context.</param>
+    /// <returns>Deserialized object cast to <c>T</c>.</returns>
     public T? ReadReflectedInstance<T>(IntPtr address, UDKGeneration generation)
-    {
-        _postfixes.Clear();
-        var instance = (T?)ReadReflectedInstance(typeof(T), address, null, generation.Instances, 0);
-
-        if (instance is null)
-        {
-            _postfixes.Clear();
-            return default;
-        }
-
-        // We need to apply postfixes here to handle some recursion edge cases
-        // where UObject-derived instance is correctly re-serialized with a lower-derived
-        // type and submitted to generation cache, but that re-serialization is not propagated
-        // to the receiving instance's field.
-
-        foreach (var (outer, field, type, pointer, index) in _postfixes)
-        {
-            var value = ReadReflectedInstance(type, pointer, index, generation.Instances, 0);
-
-            if (index is null)
-            {
-                // Instance needs to go directly to a reflected field.
-                field.SetValue(outer, value);
-            }
-            else
-            {
-                // Instance needs to be propagated to an item within a reflected array field.
-                Debug.WriteLine($"applying postfix to {field.Name}[{index!}]");
-                var array = (Array)field.GetValue(outer)!;
-                array.SetValue(value, index.Value!);
-            }
-
-        }
-
-        _postfixes.Clear();
-        return instance;
-    }
+        => (T?)ReadReflectedInstance(typeof(T), address, generation);
 }
