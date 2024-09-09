@@ -44,10 +44,11 @@ try
 
     using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: false))
     {
-        //var @object = remote.FindObjectTyped<UObject>("Class'Field'", generation);
-        var @object = remote.FindObjectTyped<UObject>("Console'UTConsole_5'", generation);
+        var function = remote.FindObjectTyped<UFunction>("Function'utgame.UTConsole.InputKey'", generation);
+        foreach (var property in function!.GetProperties(bWithSuper: false))
+            println($"{property} : {property.PropertyFlags}");
 
-        Debug.Assert(@object is not null);
+        Debug.Assert(function is not null);
         Debugger.Break();
     }
 }

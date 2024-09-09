@@ -322,6 +322,18 @@ public class UObject
     [UField("ObjectArchetype", 0x58)]
     public UObject? ObjectArchetype;
 
+    public IEnumerable<UObject> GetOuterChain()
+    {
+        UObject? iterOuter = Outer;
+        while (iterOuter is not null)
+        {
+            yield return iterOuter;
+            iterOuter = iterOuter.Outer;
+        }
+    }
+
+    public UObject GetOutermost() => GetOuterChain().Last();
+
     public override string ToString()
     {
         StringBuilder builder = new();
@@ -364,6 +376,16 @@ public class UField : UObject
 {
     [UField("Next", 0x60)]
     public UField? Next;
+
+    public IEnumerable<UField> GetNextChain()
+    {
+        UField? iterNext = Next;
+        while (iterNext is not null)
+        {
+            yield return iterNext;
+            iterNext = iterNext.Next;
+        }
+    }
 }
 
 [UClass("Struct", fixedSize: 0xD0)]
@@ -375,6 +397,34 @@ public class UStruct : UField
     public UField? Children;
     [UField("PropertiesSize", 0x88)]
     public int PropertiesSize;
+
+    public IEnumerable<UField> GetChildren(bool bWithSuper = false)
+    {
+        if (Children is not null)
+            foreach (var child in Children.GetNextChain())
+                yield return child;
+
+        if (bWithSuper)
+            foreach (var super in GetSuperChain())
+                foreach (var child in super.GetChildren())
+                    yield return child;
+    }
+
+    public IEnumerable<UProperty> GetProperties(bool bWithSuper = false)
+        => GetChildren(bWithSuper)
+            .Select(child => child as UProperty)
+            .Where(prop => prop is not null)
+            .Select(prop => prop!);
+
+    public IEnumerable<UStruct> GetSuperChain()
+    {
+        UStruct? iterSuper = SuperStruct;
+        while (iterSuper is not null)
+        {
+            yield return iterSuper;
+            iterSuper = iterSuper.SuperStruct;
+        }
+    }
 }
 
 [UClass("State", fixedSize: 0x124)]
@@ -436,6 +486,9 @@ public class UFunction : UStruct
     public ushort ReturnValueOffset;
     [UField("Func", 0xF8)]
     public IntPtr Func;
+
+    public IEnumerable<UProperty> GetParams()
+        => GetProperties(false).Where(prop => prop.PropertyFlags.HasFlag(EPropertyFlags.Param));
 }
 
 [UClass("ScriptStruct", fixedSize:0xF4)]

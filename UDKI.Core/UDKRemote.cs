@@ -696,6 +696,7 @@ public sealed class UDKRemote : IDisposable
             return null;
         }
 
+        // TODO: Find a way to avoid looking this up before the cache branch below.
         classAttribute = Attribute.GetCustomAttribute(type, typeof(UClassAttribute)) as UClassAttribute
             ?? throw new InvalidOperationException($"type {type.Name} is not reflected");
 
