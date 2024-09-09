@@ -1,4 +1,5 @@
-﻿using System.Reflection.Metadata;
+﻿using System.ComponentModel;
+using System.Reflection.Metadata;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -15,17 +16,10 @@ internal static partial class Invoke
 
     internal const IntPtr INVALID_HANDLE_VALUE = -1;
 
-    internal const uint ERROR_NO_MORE_FILES = 18;
+    internal const uint THREAD_SUSPEND_RESUME = 0x0002;
 
     internal const uint PAGE_READWRITE = 0x0004;
     internal const uint PAGE_EXECUTE_READ = 0x0020;
-
-    internal const uint PROCESS_VM_OPERATION = 0x0008;
-    internal const uint PROCESS_VM_READ = 0x0010;
-    internal const uint PROCESS_VM_WRITE = 0x0020;
-
-    internal const uint TH32CS_SNAPTHREAD = 0x0004;
-    internal const uint TH32CS_SNAPMODULE = 0x0008;
 
     internal const uint MEM_COMMIT = 0x1000;
     internal const uint MEM_RESERVE = 0x2000;
@@ -34,27 +28,6 @@ internal static partial class Invoke
     internal const uint MEM_TOP_DOWN = 0x00100000;
 
     internal const uint INFINITE = uint.MaxValue;
-
-    [StructLayout(LayoutKind.Explicit, Size = 1080, CharSet = CharSet.Unicode)]
-    internal struct ModuleEntry32W
-    {
-        [FieldOffset(0)] public uint Size;
-        [FieldOffset(4)] public uint ModuleID;
-        [FieldOffset(8)] public uint ProcessID;
-        [FieldOffset(12)] public uint GlobalUsageCount;
-        [FieldOffset(16)] public uint ProcessUsageCount;
-        [FieldOffset(24)] public IntPtr BaseAddress;
-        [FieldOffset(32)] public uint BaseSize;
-        [FieldOffset(40)] public IntPtr Handle;
-
-        [FieldOffset(48)]
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
-        public string ModuleName;
-
-        [FieldOffset(560)]
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
-        public string ExePath;
-    }
 
     /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle"/>
     [LibraryImport("Kernel32.dll")]
@@ -66,30 +39,10 @@ internal static partial class Invoke
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial IntPtr CreateRemoteThread(IntPtr Process, IntPtr ThreadAttributes, UIntPtr StackSize, IntPtr StartAddress, IntPtr Parameter, uint CreationFlags, IntPtr ThreadId);
 
-    /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-createtoolhelp32snapshot"/>
-    [LibraryImport("Kernel32.dll")]
-    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
-    internal static partial IntPtr CreateToolhelp32Snapshot(uint Flags, uint ProcessId);
-
     /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror"/>
     [LibraryImport("Kernel32.dll")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial uint GetLastError();
-
-    /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-module32firstw"/>
-    [LibraryImport("Kernel32.dll")]
-    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
-    internal static partial int Module32FirstW(IntPtr Snapshot, IntPtr ModuleEntryW);
-
-    /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-module32nextw"/>
-    [LibraryImport("Kernel32.dll")]
-    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
-    internal static partial int Module32NextW(IntPtr Snapshot, IntPtr ModuleEntryW);
-
-    /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess"/>
-    [LibraryImport("Kernel32.dll")]
-    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
-    internal static partial IntPtr OpenProcess(uint DesiredAccess, int bInheritHandle, uint ProcessId);
 
     /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-readprocessmemory"/>
     [LibraryImport("Kernel32.dll")]
@@ -100,6 +53,21 @@ internal static partial class Invoke
     [LibraryImport("Kernel32.dll")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
     internal static partial int WriteProcessMemory(IntPtr Process, IntPtr BaseAddress, IntPtr Buffer, UIntPtr Size, IntPtr NumberOfBytesWritten);
+
+    /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthread"/>
+    [LibraryImport("Kernel32.dll")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
+    internal static partial IntPtr OpenThread(uint DesiredAccess, int bInheritHandle, uint ThreadId);
+
+    /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread"/>
+    [LibraryImport("Kernel32.dll")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
+    internal static partial uint SuspendThread(IntPtr Handle);
+
+    /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-resumethread"/>
+    [LibraryImport("Kernel32.dll")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvStdcall)])]
+    internal static partial uint ResumeThread(IntPtr Handle);
 
     /// <see href="https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualallocex"/>
     [LibraryImport("Kernel32.dll")]
@@ -131,17 +99,17 @@ public static class Windows
     /// <summary>
     /// Closes an open handle.
     /// </summary>
-    public static void CloseHandle(IntPtr Handle)
+    public static void CloseHandle(IntPtr handle)
     {
-        int Result = Invoke.CloseHandle(Handle);
-        WindowsException.ThrowIf(Result == Invoke.FALSE, "failed to close handle");
+        int result = Invoke.CloseHandle(handle);
+        ThrowIf(result == Invoke.FALSE, "failed to close handle");
     }
 
     /// <summary>
     /// Creates a thread in a remote process.
     /// </summary>
     /// <returns>Handle to the created thread.</returns>
-    public static IntPtr CreateRemoteThread(ProcessHandle Handle, IntPtr EntryAddress, IntPtr Parameter, out uint ThreadId)
+    public static IntPtr CreateRemoteThread(ProcessHandle handle, IntPtr entryAddress, IntPtr entryParam, out uint threadId)
     {
         uint localThreadId = 0u;
         IntPtr localThreadHandle;
@@ -149,11 +117,11 @@ public static class Windows
         unsafe
         {
             // We omit all the parameters we will not use here...
-            localThreadHandle = Invoke.CreateRemoteThread(Handle.RawHandle, IntPtr.Zero, UIntPtr.Zero, EntryAddress, Parameter, 0, (IntPtr)(&localThreadId));
-            ThreadId = localThreadId;
+            localThreadHandle = Invoke.CreateRemoteThread(handle.RawHandle, IntPtr.Zero, UIntPtr.Zero, entryAddress, entryParam, 0, (IntPtr)(&localThreadId));
+            threadId = localThreadId;
         };
 
-        WindowsException.ThrowIf(localThreadHandle == IntPtr.Zero, "failed to create remote thread");
+        ThrowIf(localThreadHandle == IntPtr.Zero, "failed to create remote thread");
         return localThreadHandle;
     }
 
@@ -164,213 +132,138 @@ public static class Windows
     public static uint GetLastError() => Invoke.GetLastError();
 
     /// <summary>
-    /// Collects information about all modules in a process.
-    /// </summary>
-    public static List<ModuleInfo> ListProcessModules(ProcessHandle Handle)
-    {
-        List<ModuleInfo> Modules = [];
-
-        IntPtr Snapshot = Invoke.CreateToolhelp32Snapshot(Invoke.TH32CS_SNAPMODULE, Handle.Id);
-        WindowsException.ThrowIf(Snapshot == Invoke.INVALID_HANDLE_VALUE, "failed to create process snapshot");
-
-        unsafe
-        {
-            nint StructSize = Marshal.SizeOf<Invoke.ModuleEntry32W>();
-            IntPtr ModuleEntryPtr = Marshal.AllocHGlobal(StructSize);
-
-            try
-            {
-                Invoke.ModuleEntry32W Temporary = new() { Size = (uint)StructSize };
-                Marshal.StructureToPtr(Temporary, ModuleEntryPtr, true);
-
-                int LastResult = Invoke.Module32FirstW(Snapshot, ModuleEntryPtr);
-                WindowsException.ThrowIf(LastResult != Invoke.TRUE, "failed to retrieve first module info");
-
-                while (LastResult != Invoke.FALSE)
-                {
-                    Temporary = Marshal.PtrToStructure<Invoke.ModuleEntry32W>(ModuleEntryPtr);
-
-                    Modules.Add(new ModuleInfo()
-                    {
-                        Name = Temporary.ModuleName.ToString()!,
-                        ExePath = Temporary.ExePath.ToString()!,
-                        BaseAddress = Temporary.BaseAddress,
-                        BaseSize = Temporary.BaseSize,
-                    });
-
-                    LastResult = Invoke.Module32NextW(Snapshot, ModuleEntryPtr);
-                    uint LastError = Invoke.GetLastError();
-
-                    if (LastResult == Invoke.FALSE && LastError != Invoke.ERROR_NO_MORE_FILES)
-                        throw new WindowsException(LastError, "failed to retrieve next module info");
-                }
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(ModuleEntryPtr);
-            }
-
-        };
-
-        WindowsException.ThrowIf(Invoke.CloseHandle(Snapshot) == Invoke.FALSE, "failed to close process snapshot handle");
-        return Modules;
-    }
-
-    /// <summary>
-    /// Opens an existing local process by id.
-    /// </summary>
-    /// <returns>Valid open handle to the process.</returns>
-    public static IntPtr OpenProcess(uint ProcessId, bool AllowOperation, bool AllowRead, bool AllowWrite, bool InheritHandle = false)
-    {
-        uint AccessFlags = 0u;
-
-        if (AllowOperation) AccessFlags |= Invoke.PROCESS_VM_OPERATION;
-        if (AllowRead) AccessFlags |= Invoke.PROCESS_VM_READ;
-        if (AllowWrite) AccessFlags |= Invoke.PROCESS_VM_WRITE;
-
-        IntPtr Handle = Invoke.OpenProcess(AccessFlags, InheritHandle ? Invoke.TRUE : Invoke.FALSE, ProcessId);
-        WindowsException.ThrowIf(Handle == IntPtr.Zero, "failed to open process");
-
-        return Handle;
-    }
-
-    /// <summary>
     /// Reads a block of bytes from process memory into managed buffer.
     /// </summary>
     /// <returns>Number of bytes read.</returns>
-    public static ulong ReadProcessMemory(ProcessHandle Handle, IntPtr Address, Span<byte> Buffer)
+    public static ulong ReadProcessMemory(ProcessHandle handle, IntPtr address, Span<byte> buffer)
     {
-        nuint BytesRead = 0;
+        UIntPtr bytesRead = 0;
 
         unsafe
         {
-            fixed (byte* OutPtr = Buffer)
+            fixed (byte* ptr = buffer)
             {
-                var rc = Invoke.ReadProcessMemory(Handle.RawHandle, Address, (IntPtr)OutPtr, (UIntPtr)Buffer.Length, (IntPtr)(&BytesRead));
-                WindowsException.ThrowIf(rc == 0, "failed to read process memory");
+                var rc = Invoke.ReadProcessMemory(handle.RawHandle, address, (IntPtr)ptr, (UIntPtr)buffer.Length, (IntPtr)(&bytesRead));
+                ThrowIf(rc == 0, "failed to read process memory");
             }
         };
 
-        return BytesRead;
+        return bytesRead;
     }
 
     /// <summary>
     /// Writes a block of bytes from managed buffer into process memory.
     /// </summary>
     /// <returns>Number of bytes written.</returns>
-    public static ulong WriteProcessMemory(ProcessHandle Handle, IntPtr Address, ReadOnlySpan<byte> Buffer)
+    public static ulong WriteProcessMemory(ProcessHandle handle, IntPtr address, ReadOnlySpan<byte> buffer)
     {
-        nuint BytesWritten = 0;
+        UIntPtr bytesWritten = 0;
 
         unsafe
         {
-            fixed (byte* InPtr = Buffer)
+            fixed (byte* ptr = buffer)
             {
-                var rc = Invoke.WriteProcessMemory(Handle.RawHandle, Address, (IntPtr)InPtr, (UIntPtr)Buffer.Length, (IntPtr)(&BytesWritten));
-                WindowsException.ThrowIf(rc == 0, "failed to write process memory");
+                var rc = Invoke.WriteProcessMemory(handle.RawHandle, address, (IntPtr)ptr, (UIntPtr)buffer.Length, (IntPtr)(&bytesWritten));
+                ThrowIf(rc == 0, "failed to write process memory");
             }
         };
 
-        return BytesWritten;
+        return bytesWritten;
+    }
+
+    /// <summary>
+    /// Gets an open thread handle with suspend-resume permissions.
+    /// </summary>
+    public static IntPtr OpenThread(uint id)
+    {
+        IntPtr handle = Invoke.OpenThread(Invoke.THREAD_SUSPEND_RESUME, Invoke.FALSE, id);
+        ThrowIf(handle == IntPtr.Zero, $"failed to open thread {id} for suspend-resume");
+        return handle;
+    }
+
+    /// <summary>
+    /// Increases suspend count on a thread handle.
+    /// </summary>
+    public static void SuspendThread(IntPtr handle, out uint count)
+    {
+        uint rc = Invoke.SuspendThread(handle);
+        unchecked { ThrowIf(rc == (uint)-1, "failed to suspend thread"); }
+        count = rc;
+    }
+
+    /// <summary>
+    /// Decreases suspend count on a thread handle.
+    /// </summary>
+    public static void ResumeThread(IntPtr handle, out uint count)
+    {
+        uint rc = Invoke.ResumeThread(handle);
+        unchecked { ThrowIf(rc == (uint)-1, "failed to resume thread"); }
+        count = rc;
     }
 
     /// <summary>
     /// Allocates memory within a virtual address space of a process with read-write permissions.
     /// </summary>
-    public static IntPtr VirtualAlloc(ProcessHandle Process, ulong Size)
+    public static IntPtr VirtualAlloc(ProcessHandle process, ulong size)
     {
-        IntPtr Address = Invoke.VirtualAllocEx(Process.RawHandle, IntPtr.Zero, (UIntPtr)Size, Invoke.MEM_COMMIT | Invoke.MEM_RESERVE | Invoke.MEM_TOP_DOWN, Invoke.PAGE_READWRITE);
-        WindowsException.ThrowIf(Address == IntPtr.Zero, "failed to allocate virtual memory");
-        return Address;
+        uint allocType = Invoke.MEM_COMMIT | Invoke.MEM_RESERVE | Invoke.MEM_TOP_DOWN;
+        IntPtr address = Invoke.VirtualAllocEx(process.RawHandle, IntPtr.Zero, (UIntPtr)size, allocType, Invoke.PAGE_READWRITE);
+        ThrowIf(address == IntPtr.Zero, "failed to allocate virtual memory");
+        return address;
     }
 
     /// <summary>
     /// Deallocates memory within a virtual address space of a process.
     /// </summary>
-    public static void VirtualFree(ProcessHandle Process, IntPtr Address)
+    public static void VirtualFree(ProcessHandle process, IntPtr address)
     {
-        int rc = Invoke.VirtualFreeEx(Process.RawHandle, Address, UIntPtr.Zero, Invoke.MEM_RELEASE);
-        WindowsException.ThrowIf(rc == 0, "failed to deallocate virtual memory");
+        int rc = Invoke.VirtualFreeEx(process.RawHandle, address, UIntPtr.Zero, Invoke.MEM_RELEASE);
+        ThrowIf(rc == 0, "failed to deallocate virtual memory");
     }
 
     /// <summary>
     /// Updates page protection settings for a block of memory to allow reading and writing.
     /// </summary>
-    public static void VirtualProtectWritable(ProcessHandle Process, IntPtr Address, UIntPtr Size)
+    public static void VirtualProtectWritable(ProcessHandle process, IntPtr address, UIntPtr size)
     {
-        uint OldProtect = 0u;
+        uint prevProtect = 0u;
         
         unsafe
         {
-            int rc = Invoke.VirtualProtectEx(Process.RawHandle, Address, Size, Invoke.PAGE_READWRITE, (IntPtr)(&OldProtect));
-            WindowsException.ThrowIf(rc == 0, "failed to change memory protection to read-write");
+            int rc = Invoke.VirtualProtectEx(process.RawHandle, address, size, Invoke.PAGE_READWRITE, (IntPtr)(&prevProtect));
+            ThrowIf(rc == 0, "failed to change memory protection to read-write");
         }
     }
 
     /// <summary>
     /// Updates page protection settings for a block of memory to allow reading and execution.
     /// </summary>
-    public static void VirtualProtectExecutable(ProcessHandle Process, IntPtr Address, UIntPtr Size)
+    public static void VirtualProtectExecutable(ProcessHandle process, IntPtr address, UIntPtr size)
     {
-        uint OldProtect = 0u;
+        uint prevProtect = 0u;
 
         unsafe
         {
-            int rc = Invoke.VirtualProtectEx(Process.RawHandle, Address, Size, Invoke.PAGE_EXECUTE_READ, (IntPtr)(&OldProtect));
-            WindowsException.ThrowIf(rc == 0, "failed to change memory protection to read-execute");
+            int rc = Invoke.VirtualProtectEx(process.RawHandle, address, size, Invoke.PAGE_EXECUTE_READ, (IntPtr)(&prevProtect));
+            ThrowIf(rc == 0, "failed to change memory protection to read-execute");
         }
     }
 
     /// <summary>
     /// Blocks indefinitely until a synchronization object is signaled.
     /// </summary>
-    public static void WaitForSingleObject(IntPtr Handle)
+    public static void WaitForSingleObject(IntPtr handle)
     {
-        uint rc = Invoke.WaitForSingleObject(Handle, Invoke.INFINITE);
-        WindowsException.ThrowIf(rc != 0u, "failed to wait for object, or timeout interval elapsed");
+        uint rc = Invoke.WaitForSingleObject(handle, Invoke.INFINITE);
+        ThrowIf(rc != 0u, "failed to wait for object, or timeout interval elapsed");
     }
 
-}
-
-
-/// <summary>
-/// Information about a process module.
-/// </summary>
-public readonly struct ModuleInfo
-{
-    public readonly string Name { get; init; }
-    public readonly string ExePath { get; init; }
-    public readonly IntPtr BaseAddress { get; init; }
-    public readonly ulong BaseSize { get; init; }
-}
-
-
-/// <summary>
-/// Represents a Win32 API error.
-/// </summary>
-public class WindowsException(uint lastErrorCode, string message) : Exception(message)
-{
-    // TODO: Consider using system-provided Win32Exception instead of this type.
-
-    public uint LastErrorCode { get; set; } = lastErrorCode;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void ThrowIf(bool condition, string message)
+    /// <summary>
+    /// Throws a <see cref="Win32Exception"/> if <c>condition</c> evaluates true.
+    /// </summary>
+    public static void ThrowIf(bool condition, string? message)
     {
-        if (condition)
-        {
-            uint ErrorCode = Windows.GetLastError();
-            throw new WindowsException(ErrorCode, message);
-        }
+        if (condition) throw new Win32Exception((int)GetLastError(), message);
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void ThrowUnless(bool condition, string message)
-    {
-        if (!condition)
-        {
-            uint ErrorCode = Windows.GetLastError();
-            throw new WindowsException(ErrorCode, message);
-        }
-    }
 }

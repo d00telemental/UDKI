@@ -9,7 +9,7 @@
 public class UDKGeneration : IDisposable
 {
     internal readonly ProcessHandle _processHandle;
-    internal readonly bool _freezeThreads;
+    internal readonly List<uint> _frozenThreadIds;
 
     /// <summary>
     /// Maps <see cref="FNameEntry"/> index in <c>FName::Names</c> to a deserialized entry.
@@ -24,16 +24,20 @@ public class UDKGeneration : IDisposable
     public UDKGeneration(ProcessHandle processHandle, bool freezeThreads = false)
     {
         _processHandle = processHandle;
-        _freezeThreads = freezeThreads;
-        if (freezeThreads) FreezeThreads();
+        _frozenThreadIds = freezeThreads ? FreezeThreads() : [];
     }
 
 
-    // TODO: Implement thread enumeration and suspend / resume.
-    //   Currently blocked by possible rewrite with .NET's Process class.
+    List<uint> FreezeThreads()
+    {
+        return _processHandle.SuspendThreads();
+    }
 
-    void FreezeThreads() => throw new NotImplementedException();
-    void UnfreezeThreads() => throw new NotImplementedException();
+    void UnfreezeThreads()
+    {
+        _processHandle.ResumeThreads(_frozenThreadIds);
+        _frozenThreadIds.Clear();
+    }
 
 
     #region IDisposable implementation.
@@ -44,10 +48,8 @@ public class UDKGeneration : IDisposable
     {
         if (!_disposedValue)
         {
-            if (_freezeThreads)
-            {
+            if (_frozenThreadIds.Count != 0)
                 UnfreezeThreads();
-            }
 
             Names.Clear();
             Names.TrimExcess(0);

@@ -1,7 +1,4 @@
-﻿using System.ComponentModel;
-using System.Net;
-
-namespace UDKI.Core;
+﻿namespace UDKI.Core;
 
 
 /// <summary>
@@ -9,24 +6,22 @@ namespace UDKI.Core;
 /// </summary>
 public class ProcessHandle : IDisposable
 {
-    private readonly nint           _handle;
-    private readonly uint           _pid;
-    private readonly ModuleInfo     _module;
+    internal readonly Process       _process;
+    internal readonly ProcessModule _module;
     private bool                    _disposed;
 
-    public ProcessHandle(uint pid, string moduleName)
+    public ProcessHandle(Process process)
     {
-        _pid = pid;
-        _handle = Windows.OpenProcess(pid, AllowOperation: true, AllowRead: true, AllowWrite: true, InheritHandle: false);
-        _module = Windows.ListProcessModules(this).First(m => string.Equals(m.Name, moduleName, StringComparison.OrdinalIgnoreCase));
+        _process = process;
+        _module = _process.MainModule!;
     }
 
     public static ProcessHandle FindUDK()
     {
         try
         {
-            var pid = Process.GetProcesses().First(p => p.ProcessName == "UDK").Id;
-            return new ProcessHandle((uint)pid, "UDK.exe");
+            var process = Process.GetProcesses().First(p => p.ProcessName == "UDK");
+            return new ProcessHandle(process);
         }
         catch (InvalidOperationException exception)
         {
@@ -37,12 +32,12 @@ public class ProcessHandle : IDisposable
     /// <summary>
     /// Retrieves the process id behind this handle.
     /// </summary>
-    public uint Id => _pid;
+    public uint Id => (uint)_process.Id;
 
     /// <summary>
     /// Retrieves information about the main module.
     /// </summary>
-    public ModuleInfo MainModule => _module;
+    public ProcessModule MainModule => _module;
 
     /// <summary>
     /// Retrieves the raw process handle.
@@ -57,7 +52,7 @@ public class ProcessHandle : IDisposable
                 throw new InvalidOperationException("can't use disposed process handle");
             }
 
-            return _handle;
+            return _process.Handle;
         }
     }
 
@@ -123,6 +118,33 @@ public class ProcessHandle : IDisposable
         }
     }
 
+    public List<uint> SuspendThreads()
+    {
+        List<uint> suspendedThreadIds = [];
+        _process.Refresh();
+
+        foreach (ProcessThread thread in _process.Threads)
+        {
+            IntPtr threadHandle = Windows.OpenThread((uint)thread.Id);
+            Windows.SuspendThread(threadHandle, out _);
+            Windows.CloseHandle(threadHandle);
+
+            suspendedThreadIds.Add((uint)thread.Id);
+        }
+
+        return suspendedThreadIds;
+    }
+
+    public void ResumeThreads(List<uint> suspendedThreadIds)
+    {
+        foreach (uint threadId in suspendedThreadIds)
+        {
+            IntPtr threadHandle = Windows.OpenThread(threadId);
+            Windows.ResumeThread(threadHandle, out _);
+            Windows.CloseHandle(threadHandle);
+        }
+    }
+
     public IntPtr Alloc(ulong Size)
         => Windows.VirtualAlloc(this, Size);
 
@@ -143,20 +165,7 @@ public class ProcessHandle : IDisposable
     {
         if (!_disposed)
         {
-            if (_handle != IntPtr.Zero)
-            {
-                try
-                {
-                    // Avoid throwing from Dispose() implementation...
-                    Windows.CloseHandle(_handle);
-                }
-                catch (WindowsException Exception)
-                {
-                    Debug.WriteLine($"failed to close process, last error = {Exception.LastErrorCode}");
-                    if (Debugger.IsAttached) Debugger.Break();
-                }
-            }
-
+            if (disposing) _process.Dispose();
             _disposed = true;
         }
     }

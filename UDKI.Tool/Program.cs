@@ -5,6 +5,7 @@ using Iced.Intel;
 using static Iced.Intel.AssemblerRegisters;
 
 using UDKI.Core;
+using System.ComponentModel;
 
 
 #region Textual i/o utilities.
@@ -51,11 +52,11 @@ try
         println($"roundtrip for '{inputString}' name: '{outputString}' (number = {outputName.NumberPlusOne})");
     }
 
-    using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: false))
+    using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: true))
     {
         var execThread = new Thread(() =>
         {
-            var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation);
+            var console = remote.FindObjectTyped<UObject>("Console'UTConsole_1'", generation);
             Debugger.Break();
         }, maxStackSize: 100 * 1024 * 1024);
 
@@ -63,10 +64,10 @@ try
         execThread.Join();
     }
 }
-catch (WindowsException exception) when (!IS_DEBUG)
+catch (Win32Exception exception) when (!IS_DEBUG)
 {
     errorln($"win32 exception: {exception.Message}");
-    errorln($"last error code: {exception.LastErrorCode}");
+    errorln($"last error code: {exception.ErrorCode}");
     errorln($"stack trace: \n{exception.StackTrace}");
 }
 catch (Exception exception) when (!IS_DEBUG)

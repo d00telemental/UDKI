@@ -116,11 +116,7 @@ public sealed class UDKRemote : IDisposable
     /// <summary>
     /// Resolves a memory offset relative to the main module base into an absolute pointer.
     /// </summary>
-    public IntPtr ResolveMainOffset(IntPtr offset)
-    {
-        Debug.Assert((ulong)offset <= _process.MainModule.BaseSize);
-        return _process.MainModule.BaseAddress + offset;
-    }
+    public IntPtr ResolveMainOffset(IntPtr offset) => _process.MainModule.BaseAddress + offset;
 
     /// <summary>
     /// Constructs a new access generation, optionally freezing remote threads for the duration of its lifetime.
@@ -360,7 +356,7 @@ public sealed class UDKRemote : IDisposable
 
             asm.mov(rcx, __qword_ptr[r12]);         // Class to search for.
             asm.mov(rdx, 0);                        // Outer package.
-            asm.mov(r8, __qword_ptr[r12 + 8]);      // Object name, this is our primary query.
+            asm.mov(r8,  __qword_ptr[r12 + 8]);     // Object name, this is our primary query.
             asm.mov(r9d, __dword_ptr[r12 + 16]);    // Whether the class match needs to be exact (not 'IsA').
             asm.mov(__dword_ptr[rsp + 0x20], 1);    // Whether "any package" would do (must be TRUE to accommodate the null package pointer).
 
