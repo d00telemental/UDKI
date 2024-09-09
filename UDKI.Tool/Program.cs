@@ -44,11 +44,8 @@ try
 
     using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: false))
     {
-        var function = remote.FindObjectTyped<UFunction>("Function'utgame.UTConsole.InputKey'", generation);
-        foreach (var property in function!.GetProperties(bWithSuper: false))
-            println($"{property} : {property.PropertyFlags}");
-
-        Debug.Assert(function is not null);
+        var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation);
+        var function = console!.FindFunctionChecked("ConsoleCommand");
         Debugger.Break();
     }
 }
