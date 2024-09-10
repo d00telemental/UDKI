@@ -2,9 +2,11 @@
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Claims;
 using System.Text;
 
 using Iced.Intel;
+using Microsoft.VisualBasic.FileIO;
 using static Iced.Intel.AssemblerRegisters;
 
 
@@ -523,13 +525,16 @@ public sealed class UDKRemote : IDisposable
     #endregion
 
 
-    #region Instance reading internals.
+    #region Field reading internals.
 
     internal const int FArraySize = 16;
     internal const int FNameSize = 8;
     internal const int IntPtr64Size = 8;
 
-    static int GetValueSize(Type valueType, UFieldAttribute fieldAttribute)
+    record struct FieldContext(UDKGeneration Generation, bool AsFName = false, uint BitMask = uint.MaxValue);
+    record struct ReflectedFieldContext(object Instance, FieldInfo Field, int? Index, Queue<RefQueueItem> RefQueue);
+
+    static int GetValueSize(Type valueType, FieldContext fieldContext)
     {
         return valueType switch
         {
@@ -538,134 +543,63 @@ public sealed class UDKRemote : IDisposable
             var t when t == typeof(int) || t == typeof(uint) => sizeof(int),
             var t when t == typeof(long) || t == typeof(ulong) => sizeof(long),
             var t when t == typeof(IntPtr) || t == typeof(UIntPtr) => IntPtr64Size,
-            var t when t == typeof(string) && fieldAttribute.AsFName => FNameSize,
+            var t when t == typeof(string) => fieldContext.AsFName ? FNameSize : FArraySize,
             var t when t.IsArray => FArraySize,
             var t when t.IsClass => IntPtr64Size,
             _ => throw new ArgumentException($"size lookup for {valueType.Name} is not implemented", nameof(valueType)),
         };
     }
 
-    object? ReadReflectedField(ReadOnlySpan<byte> sourceBytes, object objectInstance, int? arrayIndex,
-        FieldInfo fieldInfo, UFieldAttribute fieldAttribute, Queue<RefQueueItem> refQueue)
+    object? ReadFieldValue(ReadOnlySpan<byte> bytes, Type valueType, FieldContext context, ReflectedFieldContext? reflectedContext)
     {
-        var valueType = fieldInfo.FieldType;
-        var valueOffset = fieldAttribute.FixedOffset;
-
-        if (arrayIndex is not null)
-        {
-            // If we are reading an array item, signified by non-null arrayIndex,
-            // the sourceBytes span will have just our item's bytes, instead of object
-            // instance bytes as usual.
-
-            valueType = valueType.GetElementType()!;
-            valueOffset = 0;
-        }
-
-        if (valueType == typeof(sbyte))
-        {
-            return (sbyte)sourceBytes[valueOffset];
-        }
-
-        if (valueType == typeof(byte))
-        {
-            return sourceBytes[valueOffset];
-        }
-
-        if (valueType == typeof(short))
-        {
-            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(short));
-            return BinaryPrimitives.ReadInt16LittleEndian(fieldSlice);
-        }
-
-        if (valueType == typeof(ushort))
-        {
-            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(ushort));
-            return BinaryPrimitives.ReadUInt16LittleEndian(fieldSlice);
-        }
-
-        if (valueType == typeof(int))
-        {
-            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(int));
-            return BinaryPrimitives.ReadInt32LittleEndian(fieldSlice);
-        }
-
-        if (valueType == typeof(uint))
-        {
-            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(uint));
-            return BinaryPrimitives.ReadUInt32LittleEndian(fieldSlice);
-        }
-
-        if (valueType == typeof(long))
-        {
-            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(long));
-            return BinaryPrimitives.ReadInt64LittleEndian(fieldSlice);
-        }
-
-        if (valueType == typeof(ulong))
-        {
-            var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(ulong));
-            return BinaryPrimitives.ReadUInt64LittleEndian(fieldSlice);
-        }
-
-        if (valueType == typeof(IntPtr))
-        {
-            var fieldSlice = sourceBytes.Slice(valueOffset, IntPtr64Size);
-            return BinaryPrimitives.ReadIntPtrLittleEndian(fieldSlice);
-        }
-
-        if (valueType == typeof(UIntPtr))
-        {
-            var fieldSlice = sourceBytes.Slice(valueOffset, IntPtr64Size);
-            return BinaryPrimitives.ReadUIntPtrLittleEndian(fieldSlice);
-        }
+        if (valueType == typeof(sbyte)) return (sbyte)bytes[0];
+        if (valueType == typeof(byte)) return bytes[0];
+        if (valueType == typeof(short)) return BinaryPrimitives.ReadInt16LittleEndian(bytes[..sizeof(short)]);
+        if (valueType == typeof(ushort)) return BinaryPrimitives.ReadUInt16LittleEndian(bytes[..sizeof(ushort)]);
+        if (valueType == typeof(int)) return BinaryPrimitives.ReadInt32LittleEndian(bytes[..sizeof(int)]);
+        if (valueType == typeof(uint)) return BinaryPrimitives.ReadUInt32LittleEndian(bytes[..sizeof(uint)]);
+        if (valueType == typeof(long)) return BinaryPrimitives.ReadInt64LittleEndian(bytes[..sizeof(long)]);
+        if (valueType == typeof(ulong)) return BinaryPrimitives.ReadUInt64LittleEndian(bytes[..sizeof(ulong)]);
+        if (valueType == typeof(IntPtr)) return BinaryPrimitives.ReadIntPtrLittleEndian(bytes[..IntPtr64Size]);
+        if (valueType == typeof(UIntPtr)) return BinaryPrimitives.ReadUIntPtrLittleEndian(bytes[..IntPtr64Size]);
 
         if (valueType == typeof(string))
         {
-            if (fieldAttribute.AsFName)
+            if (context.AsFName)
             {
-                var fieldSlice = sourceBytes.Slice(valueOffset, FNameSize);
-                FName name = MemoryMarshal.Read<FName>(fieldSlice);
+                FName name = new(bytes[..FNameSize]);
                 return ReadName(name);
             }
             else
             {
-                var fieldSlice = sourceBytes.Slice(valueOffset, FArraySize);
-                var fieldArray = new FArray(fieldSlice);
+                FArray fieldArray = new(bytes[..FArraySize]);
 
                 if (fieldArray.Count == 0)
                     return string.Empty;
 
-                var byteCount = (fieldArray.Count - 1) * sizeof(ushort);
-                var byteBuffer = new byte[byteCount];
-
+                var byteBuffer = new byte[(fieldArray.Count - 1) * sizeof(ushort)];
                 _process.ReadMemoryChecked(fieldArray.Allocation, byteBuffer);
+
                 return Encoding.Unicode.GetString(byteBuffer);
             }
         }
 
         if (valueType.IsSZArray)
         {
-            var fieldSlice = sourceBytes.Slice(valueOffset, FArraySize);
-            var fieldArray = new FArray(fieldSlice);
+            FArray fieldArray = new(bytes[..FArraySize]);
 
             var elemType = valueType.GetElementType()!;
-            var elemSize = GetValueSize(elemType, fieldAttribute);
-
-            // TODO: Implement fast path for arrays of numeric types.
-
-            //if (elemType == typeof(byte))
-            //    Debugger.Break();
+            var elemSize = GetValueSize(elemType, context);
+            var elemBuffer = new byte[elemSize];
 
             var fieldValue = Array.CreateInstance(elemType, fieldArray.Count);
 
             for (var i = 0; i < fieldArray.Count; i++)
             {
                 var itemOffset = fieldArray.GetItemOffset(i, elemSize);
-                var itemBuffer = new byte[elemSize];
+                _process.ReadMemoryChecked(itemOffset, elemBuffer);
 
-                _process.ReadMemoryChecked(itemOffset, itemBuffer);
-
-                var itemValue = ReadReflectedField(itemBuffer, objectInstance, i, fieldInfo, fieldAttribute, refQueue);
+                var itemValue = ReadFieldValue(elemBuffer, elemType, context, reflectedContext);
                 fieldValue.SetValue(itemValue, i);
             }
 
@@ -674,17 +608,27 @@ public sealed class UDKRemote : IDisposable
 
         if (valueType.IsClass)
         {
-            var fieldSlice = sourceBytes.Slice(valueOffset, IntPtr64Size);
+            var fieldSlice = bytes[..IntPtr64Size];
             var fieldPointer = BinaryPrimitives.ReadIntPtrLittleEndian(fieldSlice);
 
-            if (fieldPointer != IntPtr.Zero)
-            {
-                // To avoid recursion hundreds of levels deep, we just push this site to the queue,
-                // and top-level object reading function will iterate it until there are no references left.
-                refQueue.Enqueue(new RefQueueItem(objectInstance, fieldInfo, valueType, fieldPointer, arrayIndex));
-            }
+            if (fieldPointer == IntPtr.Zero)
+                return null;
 
-            return null;
+            if (reflectedContext is ReflectedFieldContext rctx)
+            {
+                // We only have a ReflectedFieldContext when in a ReadReflectedInstance call tree,
+                // which means we must push references to a queue defined somewhere up the call stack.
+                rctx.RefQueue.Enqueue(new(rctx.Instance, rctx.Field, valueType, fieldPointer, rctx.Index));
+                return null;
+            }
+            else
+            {
+                // We do not have a ReflectedFieldContext when serializing an Unreal-reflected property,
+                // so we should read a new instance directly. Internally it will create a new reference queue
+                // and iterate all the instances it discovers down that reference tree.
+                Debug.Assert(reflectedContext is null);
+                return ReadReflectedInstance(valueType, fieldPointer, context.Generation);
+            }
         }
 
         if (valueType.IsEnum)
@@ -693,24 +637,60 @@ public sealed class UDKRemote : IDisposable
 
             if (enumBaseType == typeof(uint))
             {
-                var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(uint));
-                var fieldInteger = BinaryPrimitives.ReadUInt32LittleEndian(fieldSlice);
+                var fieldInteger = BinaryPrimitives.ReadUInt32LittleEndian(bytes[..sizeof(uint)]);
                 return Enum.ToObject(valueType, fieldInteger);
             }
 
             if (enumBaseType == typeof(ulong))
             {
-                var fieldSlice = sourceBytes.Slice(valueOffset, sizeof(ulong));
-                var fieldInteger = BinaryPrimitives.ReadUInt64LittleEndian(fieldSlice);
+                var fieldInteger = BinaryPrimitives.ReadUInt64LittleEndian(bytes[..sizeof(ulong)]);
                 return Enum.ToObject(valueType, fieldInteger);
             }
         }
 
-        throw new ArgumentException($"value reading for {valueType.FullName} is not implemented", nameof(fieldInfo));
+        throw new NotImplementedException($"value reading for {valueType.FullName} is not implemented");
     }
 
-    object? ReadReflectedInstanceInternal(Type type, IntPtr address,
-        UDKGeneration objContext, Queue<RefQueueItem> refQueue, out UClassAttribute classAttribute)
+    #endregion
+
+
+    internal byte[] ReadObjectBytes(UObject instance)
+    {
+        var objectBytes = new byte[instance.Class!.PropertiesSize];
+        _process.ReadMemoryChecked(instance._sourcePointer, objectBytes);
+        return objectBytes;
+    }
+
+    internal object? ReadPropertyInternal(ReadOnlySpan<byte> objectBytes, UDKGeneration generation, UProperty property)
+    {
+        (Type fieldType, FieldContext fieldContext) = property switch
+        {
+            UByteProperty => (typeof(byte), new FieldContext(generation)),
+            UIntProperty => (typeof(int), new FieldContext(generation)),
+            UFloatProperty => (typeof(float), new FieldContext(generation)),
+            UBoolProperty prop => (typeof(bool), new FieldContext(generation, BitMask: prop.BitMask)),
+            UStrProperty => (typeof(string), new FieldContext(generation)),
+            UNameProperty => (typeof(string), new FieldContext(generation, AsFName: true)),
+            //UDelegateProperty => throw new NotImplementedException(),
+            UObjectProperty or UClassProperty => (typeof(UObject), new FieldContext(generation)),
+            //UInterfaceProperty => throw new NotImplementedException(),
+            //UStructProperty => throw new NotImplementedException(),
+            //UArrayProperty => throw new NotImplementedException(),
+            //UMapProperty => throw new NotImplementedException(),
+            _ => throw new NotImplementedException(),
+        };
+
+        ReadOnlySpan<byte> fieldSlice = objectBytes[property.Offset..];
+        object? fieldValue = ReadFieldValue(fieldSlice, fieldType, fieldContext, null);
+
+        return fieldValue;
+    }
+
+
+    #region Instance reading internals.
+
+    object? ReadReflectedInstanceInternal(Type type, IntPtr address, UDKGeneration generation,
+        Queue<RefQueueItem> refQueue, out UClassAttribute classAttribute)
     {
         if (address == IntPtr.Zero)
         {
@@ -718,7 +698,7 @@ public sealed class UDKRemote : IDisposable
             return null;
         }
 
-        if (objContext.Instances.TryGetValue(address, out var saved))
+        if (generation.Instances.TryGetValue(address, out var saved))
         {
             // Generally, we would like to avoid recursive re-deserialization of same instances.
             // However when deserializing an instance cached with a higher type, we want to update it.
@@ -736,13 +716,13 @@ public sealed class UDKRemote : IDisposable
         _classAttributeCache[type] = classAttribute;
 
         var objectInstance = Activator.CreateInstance(type)!;
-        objContext.Instances[address] = (objectInstance, type);
+        generation.Instances[address] = (objectInstance, type);
 
         if (objectInstance is UObject @object)
         {
             _sourcePointerField.SetValue(@object, address);
             _sourceRemoteField.SetValue(@object, new WeakReference<UDKRemote>(this));
-            _sourceGenerationField.SetValue(@object, new WeakReference<UDKGeneration>(objContext));
+            _sourceGenerationField.SetValue(@object, new WeakReference<UDKGeneration>(generation));
         }
 
         var objectBytes = _objectMemoryPool.Rent(classAttribute.FixedSize);
@@ -767,7 +747,13 @@ public sealed class UDKRemote : IDisposable
         foreach (var fieldPair in typeFields!)
         {
             (FieldInfo fieldInfo, UFieldAttribute fieldAttribute) = fieldPair;
-            var fieldValue = ReadReflectedField(objectBytes, objectInstance, null, fieldInfo, fieldAttribute, refQueue);
+
+            FieldContext context = new(generation, fieldAttribute.AsFName);
+            ReflectedFieldContext reflectedContext = new(objectInstance, fieldInfo, null, refQueue);
+
+            var fieldSlice = objectBytes.AsSpan()[fieldAttribute.FixedOffset..];
+            var fieldValue = ReadFieldValue(fieldSlice, fieldInfo.FieldType, context, reflectedContext);
+
             fieldInfo.SetValue(objectInstance, fieldValue!);
         }
 
@@ -775,15 +761,15 @@ public sealed class UDKRemote : IDisposable
         return objectInstance;
     }
 
-    object? ReadReflectedInstance(Type type, IntPtr address, UDKGeneration objContext, Queue<RefQueueItem> refQueue)
+    object? ReadReflectedInstance(Type type, IntPtr address, UDKGeneration generation, Queue<RefQueueItem> refQueue)
     {
-        var instance = ReadReflectedInstanceInternal(type, address, objContext, refQueue, out var classAttribute);
+        var instance = ReadReflectedInstanceInternal(type, address, generation, refQueue, out var classAttribute);
         if (instance is null) return default;
 
         while (refQueue.TryDequeue(out RefQueueItem item))
         {
             var (outer, field, qtype, pointer, index) = item;
-            var valueInstance = ReadReflectedInstanceInternal(qtype, pointer, objContext, refQueue, out var valueClassAttribute);
+            var valueInstance = ReadReflectedInstanceInternal(qtype, pointer, generation, refQueue, out var valueClassAttribute);
 
             if (valueInstance is null) continue;
 
@@ -814,7 +800,7 @@ public sealed class UDKRemote : IDisposable
         }
 
         if (CheckNeedsDowncast(instance, classAttribute.Name, out var lowerType))
-            return ReadReflectedInstance(lowerType, address, objContext, refQueue);
+            return ReadReflectedInstance(lowerType, address, generation, refQueue);
 
         return instance;
     }

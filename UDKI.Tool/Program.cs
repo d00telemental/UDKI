@@ -39,14 +39,17 @@ try
     using var remote = new UDKRemote();
     using var generation = remote.CreateGeneration();
 
-    var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation);
-    var function = console!.FindFunctionChecked("InputKey");
+    var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation)!;
 
-    foreach (var param in function.GetParams())
-    {
-        var color = param.PropertyFlags.HasFlag(EPropertyFlags.ReturnParam) ? ConsoleColor.DarkYellow : ConsoleColor.DarkCyan;
-        printlnc(color, $"{param.Class!.Name} {param.Name}, offset = {param.Offset}, size = {param.ElementSize}");
-    }
+    //var function = console!.FindFunctionChecked("InputKey");
+    //foreach (var param in function.GetParams())
+    //{
+    //    var color = param.PropertyFlags.HasFlag(EPropertyFlags.ReturnParam) ? ConsoleColor.DarkYellow : ConsoleColor.DarkCyan;
+    //    printlnc(color, $"{param.Class!.Name} {param.Name}, offset = {param.Offset}, size = {param.ElementSize}");
+    //}
+
+    println($"currently typed string = {console.GetPropertyValue<string>("TypedStr")}");
+    println($"max scrollback size = {console.GetPropertyValue<int>("MaxScrollbackSize")}");
 
     Debugger.Break();
 }

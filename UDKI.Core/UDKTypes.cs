@@ -349,9 +349,10 @@ public class FStackFrame : FFrame
 [UClass("Object", fixedSize: 0x60)]
 public class UObject
 {
-    protected IntPtr _sourcePointer;
-    protected WeakReference<UDKRemote>? _sourceRemote;
-    protected WeakReference<UDKGeneration>? _sourceGeneration;
+    protected internal IntPtr _sourcePointer;
+    protected internal WeakReference<UDKRemote>? _sourceRemote;
+    protected internal WeakReference<UDKGeneration>? _sourceGeneration;
+    protected internal byte[]? _cachedBytes;
 
     [UField("VfTableObject", 0x00)]
     public IntPtr VfTableObject;
@@ -383,6 +384,25 @@ public class UObject
     }
 
     public UObject GetOutermost() => GetOuterChain().Last();
+
+    public object? GetPropertyValue(string name)
+    {
+        if (!_sourceRemote!.TryGetTarget(out UDKRemote? sourceRemote))
+            throw new InvalidOperationException();
+
+        if (!_sourceGeneration!.TryGetTarget(out UDKGeneration? sourceGeneration))
+            throw new InvalidOperationException();
+
+        UProperty property = Class?.GetProperties(true).FirstOrDefault(p => p.Name == name)
+            ?? throw new KeyNotFoundException($"property '{name}' is not present on '{this}'");
+
+        // Bytes are lazily initialized to avoid copying entire game memory.
+        _cachedBytes ??= sourceRemote.ReadObjectBytes(this);
+
+        return sourceRemote.ReadPropertyInternal(_cachedBytes, sourceGeneration, property);
+    }
+
+    public T GetPropertyValue<T>(string name) => (T)GetPropertyValue(name)!;
 
     public UFunction? FindFunction(string funcName, bool bGlobalOnly = false)
     {
