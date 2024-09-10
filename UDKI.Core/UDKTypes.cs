@@ -107,47 +107,6 @@ public struct FNameEntry
     }
 }
 
-[UClass("FFrame", fixedSize: 0x44)]
-public class FFrame
-{
-    [UField("VfTableObject", 0x00)]
-    public IntPtr VfTableObject;
-    [UField("bAllowSuppression", 0x08)]
-    public int bAllowSuppression;
-    [UField("bSuppressEventTag", 0x0C)]
-    public int bSuppressEventTag;
-    [UField("bAutoEmitLineTerminator", 0x10)]
-    public int bAutoEmitLineTerminator;
-    [UField("Node", 0x14)]
-    public UStruct? Node;
-    [UField("Object", 0x1C)]
-    public UObject? Object;
-    [UField("Code", 0x24)]
-    public IntPtr Code;
-    [UField("Locals", 0x2C)]
-    public IntPtr Locals;
-    [UField("PreviousFrame", 0x34)]
-    public FStackFrame? PreviousFrame;
-    [UField("OutParams", 0x3C)]
-    public IntPtr OutParams;
-}
-
-[UClass("FStackFrame", fixedSize: 0x6C)]
-public class FStackFrame : FFrame
-{
-    [UField("StateNode", 0x44)]
-    public UState? StateNode;
-    [UField("ProbeMask", 0x4C)]
-    public uint ProbeMask;
-    [UField("LatentAction", 0x50)]
-    public ushort LatentAction;
-    [UField("bContinuedState", 0x52)]
-    public byte bContinuedState;
-    // 0x54: StateStack
-    [UField("LocalVarsOwner", 0x64)]
-    public IntPtr LocalVarsOwner;
-}
-
 #endregion
 
 
@@ -339,11 +298,61 @@ public enum EFunctionFlags : uint
 #endregion
 
 
+#region Miscellaneous types.
+
+[UClass("FFrame", fixedSize: 0x44)]
+public class FFrame
+{
+    [UField("VfTableObject", 0x00)]
+    public IntPtr VfTableObject;
+    [UField("bAllowSuppression", 0x08)]
+    public int bAllowSuppression;
+    [UField("bSuppressEventTag", 0x0C)]
+    public int bSuppressEventTag;
+    [UField("bAutoEmitLineTerminator", 0x10)]
+    public int bAutoEmitLineTerminator;
+    [UField("Node", 0x14)]
+    public UStruct? Node;
+    [UField("Object", 0x1C)]
+    public UObject? Object;
+    [UField("Code", 0x24)]
+    public IntPtr Code;
+    [UField("Locals", 0x2C)]
+    public IntPtr Locals;
+    [UField("PreviousFrame", 0x34)]
+    public FStackFrame? PreviousFrame;
+    [UField("OutParams", 0x3C)]
+    public IntPtr OutParams;
+}
+
+[UClass("FStackFrame", fixedSize: 0x6C)]
+public class FStackFrame : FFrame
+{
+    [UField("StateNode", 0x44)]
+    public UState? StateNode;
+    [UField("ProbeMask", 0x4C)]
+    public uint ProbeMask;
+    [UField("LatentAction", 0x50)]
+    public ushort LatentAction;
+    [UField("bContinuedState", 0x52)]
+    public byte bContinuedState;
+    // 0x54: StateStack
+    [UField("LocalVarsOwner", 0x64)]
+    public IntPtr LocalVarsOwner;
+}
+
+#endregion
+
+
 #region UObject hierarchy.
 
 [UClass("Object", fixedSize: 0x60)]
 public class UObject
 {
+    protected IntPtr _sourcePointer;
+    protected WeakReference<UDKRemote>? _sourceRemote;
+    protected WeakReference<UDKGeneration>? _sourceGeneration;
+
     [UField("VfTableObject", 0x00)]
     public IntPtr VfTableObject;
     [UField("ObjectFlags", 0x10)]

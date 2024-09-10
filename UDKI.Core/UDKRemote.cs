@@ -34,6 +34,10 @@ public sealed class UDKRemote : IDisposable
 
     readonly ArrayPool<byte> _objectMemoryPool;
 
+    readonly FieldInfo _sourcePointerField;
+    readonly FieldInfo _sourceRemoteField;
+    readonly FieldInfo _sourceGenerationField;
+
     readonly IntPtr _addressObjects;
     readonly IntPtr _addressNames;
     readonly IntPtr _addressFNameInit;
@@ -75,6 +79,10 @@ public sealed class UDKRemote : IDisposable
         _process.WriteMemoryChecked(_paramStructAllocation, paramStructBytes);
 
         _objectMemoryPool = ArrayPool<byte>.Create();
+
+        _sourcePointerField = typeof(UObject).GetField("_sourcePointer", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        _sourceRemoteField = typeof(UObject).GetField("_sourceRemote", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        _sourceGenerationField = typeof(UObject).GetField("_sourceGeneration", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
         _addressObjects = ResolveMainOffset(UDKOffsets.GObjObjects);
         _addressNames = ResolveMainOffset(UDKOffsets.Names);
@@ -511,7 +519,7 @@ public sealed class UDKRemote : IDisposable
     #endregion
 
 
-    #region Object reading internals.
+    #region Instance reading internals.
 
     internal const int FArraySize = 16;
     internal const int FNameSize = 8;
@@ -534,7 +542,7 @@ public sealed class UDKRemote : IDisposable
     }
 
     object? ReadReflectedField(ReadOnlySpan<byte> sourceBytes, object objectInstance, int? arrayIndex,
-        FieldInfo fieldInfo, UFieldAttribute fieldAttribute, Dictionary<IntPtr, object> cache, Queue<RefQueueItem> refQueue)
+        FieldInfo fieldInfo, UFieldAttribute fieldAttribute, Queue<RefQueueItem> refQueue)
     {
         var valueType = fieldInfo.FieldType;
         var valueOffset = fieldAttribute.FixedOffset;
@@ -653,7 +661,7 @@ public sealed class UDKRemote : IDisposable
 
                 _process.ReadMemoryChecked(itemOffset, itemBuffer);
 
-                var itemValue = ReadReflectedField(itemBuffer, objectInstance, i, fieldInfo, fieldAttribute, cache, refQueue);
+                var itemValue = ReadReflectedField(itemBuffer, objectInstance, i, fieldInfo, fieldAttribute, refQueue);
                 fieldValue.SetValue(itemValue, i);
             }
 
@@ -698,7 +706,7 @@ public sealed class UDKRemote : IDisposable
     }
 
     object? ReadReflectedInstanceInternal(Type type, IntPtr address, int? arrayIndex,
-        Dictionary<IntPtr, object> cache, Queue<RefQueueItem> refQueue, out UClassAttribute classAttribute)
+        UDKGeneration objContext, Queue<RefQueueItem> refQueue, out UClassAttribute classAttribute)
     {
         if (address == IntPtr.Zero)
         {
@@ -710,7 +718,7 @@ public sealed class UDKRemote : IDisposable
         classAttribute = Attribute.GetCustomAttribute(type, typeof(UClassAttribute)) as UClassAttribute
             ?? throw new InvalidOperationException($"type {type.Name} is not reflected");
 
-        if (cache.TryGetValue(address, out object? saved) && !type.IsSubclassOf(saved!.GetType()))
+        if (objContext.Instances.TryGetValue(address, out object? saved) && !type.IsSubclassOf(saved!.GetType()))
         {
             // Generally, we would like to avoid recursive re-deserialization of same instances.
             // However when deserializing an instance cached with a higher type, we want to update it.
@@ -721,14 +729,21 @@ public sealed class UDKRemote : IDisposable
         _process.ReadMemoryChecked(address, objectBytes.AsSpan()[..classAttribute.FixedSize]);
 
         var objectInstance = Activator.CreateInstance(type)!;
-        cache[address] = objectInstance;
+        objContext.Instances[address] = objectInstance;
+
+        if (objectInstance is UObject @object)
+        {
+            _sourcePointerField.SetValue(@object, address);
+            _sourceRemoteField.SetValue(@object, new WeakReference<UDKRemote>(this));
+            _sourceGenerationField!.SetValue(@object, new WeakReference<UDKGeneration>(objContext));
+        }
 
         foreach (FieldInfo fieldInfo in type.GetFields())
         {
             // Fields on reflected types are allowed to not be reflected.
             if (fieldInfo.GetCustomAttribute(typeof(UFieldAttribute)) is UFieldAttribute fieldAttribute)
             {
-                var fieldValue = ReadReflectedField(objectBytes, objectInstance, null, fieldInfo, fieldAttribute, cache, refQueue);
+                var fieldValue = ReadReflectedField(objectBytes, objectInstance, null, fieldInfo, fieldAttribute, refQueue);
                 fieldInfo.SetValueDirect(__makeref(objectInstance), fieldValue!);
             }
         }
@@ -737,15 +752,15 @@ public sealed class UDKRemote : IDisposable
         return objectInstance;
     }
 
-    object? ReadReflectedInstance(Type type, IntPtr address, UDKGeneration generation, Queue<RefQueueItem> refQueue)
+    object? ReadReflectedInstance(Type type, IntPtr address, UDKGeneration objContext, Queue<RefQueueItem> refQueue)
     {
-        var instance = ReadReflectedInstanceInternal(type, address, null, generation.Instances, refQueue, out var classAttribute);
+        var instance = ReadReflectedInstanceInternal(type, address, null, objContext, refQueue, out var classAttribute);
         if (instance is null) return default;
 
         while (refQueue.TryDequeue(out RefQueueItem item))
         {
             var (outer, field, qtype, pointer, index) = item;
-            var valueInstance = ReadReflectedInstanceInternal(qtype, pointer, index, generation.Instances, refQueue, out var valueClassAttribute);
+            var valueInstance = ReadReflectedInstanceInternal(qtype, pointer, index, objContext, refQueue, out var valueClassAttribute);
 
             if (valueInstance is null) continue;
 
@@ -772,7 +787,7 @@ public sealed class UDKRemote : IDisposable
         }
 
         if (CheckNeedsDowncast(instance, classAttribute.Name, out var lowerType))
-            return ReadReflectedInstance(lowerType, address, generation, refQueue);
+            return ReadReflectedInstance(lowerType, address, objContext, refQueue);
 
         return instance;
     }
