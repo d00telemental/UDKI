@@ -11,6 +11,13 @@ var println = (string text) =>
     Console.WriteLine($"  {text}");
 };
 
+var printlnc = (ConsoleColor color, string text) =>
+{
+    Console.ForegroundColor = color;
+    Console.WriteLine($"  {text}");
+    Console.ResetColor();
+};
+
 var errorln = (string text) =>
 {
     Console.ForegroundColor = ConsoleColor.Red;
@@ -27,35 +34,29 @@ var queryln = (string text) =>
 #endregion
 
 
-#if DEBUG
-bool IS_DEBUG = true;
-#else
-bool IS_DEBUG = false;
-#endif
-
-
 try
 {
-    using var process = ProcessHandle.FindUDK();
-    println($"found udk.exe process, id = {process.Id}");
+    using var remote = new UDKRemote();
+    using var generation = remote.CreateGeneration();
 
-    using var remote = new UDKRemote(process);
-    println($"established remote connection");
+    var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation);
+    var function = console!.FindFunctionChecked("InputKey");
 
-    using (UDKGeneration generation = remote.CreateGeneration(freezeThreads: false))
+    foreach (var param in function.GetParams())
     {
-        var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation);
-        var function = console!.FindFunctionChecked("ConsoleCommand");
-        Debugger.Break();
+        var color = param.PropertyFlags.HasFlag(EPropertyFlags.ReturnParam) ? ConsoleColor.DarkYellow : ConsoleColor.DarkCyan;
+        printlnc(color, $"{param.Name}, offset = {param.Offset}, size = {param.ElementSize}");
     }
+
+    Debugger.Break();
 }
-catch (Win32Exception exception) when (!IS_DEBUG)
+catch (Win32Exception exception) when (!Debugger.IsAttached)
 {
     errorln($"win32 exception: {exception.Message}");
     errorln($"last error code: {exception.ErrorCode}");
     errorln($"stack trace: \n{exception.StackTrace}");
 }
-catch (Exception exception) when (!IS_DEBUG)
+catch (Exception exception) when (!Debugger.IsAttached)
 {
     errorln($"generic exception: {exception.Message}");
     errorln($"stack trace: \n{exception.StackTrace}");

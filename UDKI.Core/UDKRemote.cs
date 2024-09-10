@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -17,27 +18,28 @@ namespace UDKI.Core;
 /// </summary>
 public sealed class UDKRemote : IDisposable
 {
-    private readonly ProcessHandle _process;
-    private readonly BufferedStream _stream;
-    private readonly UDKGeneration _generation;
+    record struct RefQueueItem(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
 
-    internal record struct RefQueueItem(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
+    readonly ProcessHandle _process;
+    readonly UDKGeneration _generation;
+    readonly BufferedStream _stream;
 
-    private readonly IntPtr _inputBufferAllocation;
-    private readonly byte[] _inputBufferZeros;
-    private readonly IntPtr _outputBufferAllocation;
-    private readonly byte[] _outputBufferZeros;
+    readonly bool _disposeProcessHandle;
 
-    private readonly IntPtr _paramStructAllocation;
+    readonly IntPtr _inputBufferAllocation;
+    readonly byte[] _inputBufferZeros;
+    readonly IntPtr _outputBufferAllocation;
+    readonly byte[] _outputBufferZeros;
+    readonly IntPtr _paramStructAllocation;
 
-    private readonly ArrayPool<byte> _objectMemoryPool;
+    readonly ArrayPool<byte> _objectMemoryPool;
 
-    private readonly IntPtr _addressObjects;
-    private readonly IntPtr _addressNames;
-    private readonly IntPtr _addressFNameInit;
-    private readonly IntPtr _addressStaticFindObject;
-    private readonly IntPtr _addressStaticFindObjectFastInternal;
-    private readonly IntPtr _addressClassClass;
+    readonly IntPtr _addressObjects;
+    readonly IntPtr _addressNames;
+    readonly IntPtr _addressFNameInit;
+    readonly IntPtr _addressStaticFindObject;
+    readonly IntPtr _addressStaticFindObjectFastInternal;
+    readonly IntPtr _addressClassClass;
 
     /// <summary>Number of bytes allocated for internal parameters buffer.</summary>
     public const int InputBufferSize = 1024;
@@ -49,11 +51,13 @@ public sealed class UDKRemote : IDisposable
     public const int StreamBufferSize = 128;
 
 
-    public UDKRemote(ProcessHandle process)
+    UDKRemote(ProcessHandle processHandle, bool bDisposeHandle)
     {
-        _process = process;
-        _stream = new(new ProcessMemoryStream(_process), StreamBufferSize);
+        _process = processHandle;
         _generation = new(_process, freezeThreads: false);
+        _stream = new(new ProcessMemoryStream(_process), StreamBufferSize);
+
+        _disposeProcessHandle = bDisposeHandle;
 
         _inputBufferAllocation = _process.Alloc(InputBufferSize);
         _inputBufferZeros = new byte[InputBufferSize];
@@ -80,6 +84,9 @@ public sealed class UDKRemote : IDisposable
         _addressClassClass = ReadPointer(ResolveMainOffset(0x356D860));
     }
 
+    public UDKRemote() : this(ProcessHandle.FindUDK(), true) { }
+    public UDKRemote(ProcessHandle process) : this(process, false) { }
+
 
     #region IDisposable implementation.
 
@@ -89,15 +96,18 @@ public sealed class UDKRemote : IDisposable
     {
         if (!_disposedValue)
         {
+            _process.Free(_inputBufferAllocation);
+            _process.Free(_outputBufferAllocation);
+            _process.Free(_paramStructAllocation);
+
             if (disposing)
             {
                 _generation.Dispose();
                 _stream.Dispose();
-            }
 
-            _process.Free(_inputBufferAllocation);
-            _process.Free(_outputBufferAllocation);
-            _process.Free(_paramStructAllocation);
+                if (_disposeProcessHandle)
+                    _process.Dispose();
+            }
 
             _disposedValue = true;
         }

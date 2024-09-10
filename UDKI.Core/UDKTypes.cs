@@ -488,13 +488,18 @@ public class UStruct : UField
     public IEnumerable<UField> GetChildren(bool bWithSuper = false)
     {
         if (Children is not null)
+        {
+            yield return Children;
             foreach (var child in Children.GetNextChain())
                 yield return child;
+        }
 
         if (bWithSuper)
+        {
             foreach (var super in GetSuperChain())
                 foreach (var child in super.GetChildren())
                     yield return child;
+        }
     }
 
     public IEnumerable<UFunction> GetFunctions(bool bWithSuper = false)
