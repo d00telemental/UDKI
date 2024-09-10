@@ -805,8 +805,12 @@ public sealed class UDKRemote : IDisposable
                 array.SetValue(valueInstance, index.Value!);
             }
 
-            if (CheckNeedsRevisit(valueInstance, valueClassAttribute.Name))
+            if (valueInstance is UObject @object && @object.Class is null)
+            {
+                // If UObject.Class is null, CheckNeedsDowncast(..) couldn't have checked for a downcast,
+                // so we'll keep re-enqueuing this instance until it can actually check the reflected class.
                 refQueue.Enqueue(new(outer, field, valueInstance.GetType(), pointer, index));
+            }
         }
 
         if (CheckNeedsDowncast(instance, classAttribute.Name, out var lowerType))
@@ -860,9 +864,6 @@ public sealed class UDKRemote : IDisposable
         lowerType = typeof(void);
         return false;
     }
-
-    static bool CheckNeedsRevisit(object checkedInstance, string staticClassName)
-        => checkedInstance is UObject @object && @object.Class is null;
 
     #endregion
 
