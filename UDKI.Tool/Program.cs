@@ -45,7 +45,7 @@ try
     foreach (var param in function.GetParams())
     {
         var color = param.PropertyFlags.HasFlag(EPropertyFlags.ReturnParam) ? ConsoleColor.DarkYellow : ConsoleColor.DarkCyan;
-        printlnc(color, $"{param.Name}, offset = {param.Offset}, size = {param.ElementSize}");
+        printlnc(color, $"{param.Class!.Name} {param.Name}, offset = {param.Offset}, size = {param.ElementSize}");
     }
 
     Debugger.Break();

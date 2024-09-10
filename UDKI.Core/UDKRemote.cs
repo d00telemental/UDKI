@@ -1,7 +1,5 @@
-﻿using System;
-using System.Buffers;
+﻿using System.Buffers;
 using System.Buffers.Binary;
-using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -25,6 +23,9 @@ public sealed class UDKRemote : IDisposable
     readonly BufferedStream _stream;
 
     readonly bool _disposeProcessHandle;
+
+    readonly Dictionary<Type, UClassAttribute> _classAttributeCache;
+    readonly Dictionary<Type, (FieldInfo, UFieldAttribute)[]> _fieldArrayCache;
 
     readonly IntPtr _inputBufferAllocation;
     readonly byte[] _inputBufferZeros;
@@ -62,6 +63,9 @@ public sealed class UDKRemote : IDisposable
         _stream = new(new ProcessMemoryStream(_process), StreamBufferSize);
 
         _disposeProcessHandle = bDisposeHandle;
+
+        _classAttributeCache = [];
+        _fieldArrayCache = [];
 
         _inputBufferAllocation = _process.Alloc(InputBufferSize);
         _inputBufferZeros = new byte[InputBufferSize];
@@ -705,7 +709,7 @@ public sealed class UDKRemote : IDisposable
         throw new ArgumentException($"value reading for {valueType.FullName} is not implemented", nameof(fieldInfo));
     }
 
-    object? ReadReflectedInstanceInternal(Type type, IntPtr address, int? arrayIndex,
+    object? ReadReflectedInstanceInternal(Type type, IntPtr address,
         UDKGeneration objContext, Queue<RefQueueItem> refQueue, out UClassAttribute classAttribute)
     {
         if (address == IntPtr.Zero)
@@ -714,38 +718,57 @@ public sealed class UDKRemote : IDisposable
             return null;
         }
 
-        // TODO: Find a way to avoid looking this up before the cache branch below.
-        classAttribute = Attribute.GetCustomAttribute(type, typeof(UClassAttribute)) as UClassAttribute
-            ?? throw new InvalidOperationException($"type {type.Name} is not reflected");
-
-        if (objContext.Instances.TryGetValue(address, out object? saved) && !type.IsSubclassOf(saved!.GetType()))
+        if (objContext.Instances.TryGetValue(address, out var saved))
         {
             // Generally, we would like to avoid recursive re-deserialization of same instances.
             // However when deserializing an instance cached with a higher type, we want to update it.
-            return saved;
+
+            (object savedInstance, Type savedType) = saved;
+            if (!type.IsSubclassOf(savedInstance.GetType()))
+            {
+                classAttribute = _classAttributeCache[savedType];
+                return savedInstance;
+            }
         }
 
-        var objectBytes = _objectMemoryPool.Rent(classAttribute.FixedSize);
-        _process.ReadMemoryChecked(address, objectBytes.AsSpan()[..classAttribute.FixedSize]);
+        classAttribute = Attribute.GetCustomAttribute(type, typeof(UClassAttribute)) as UClassAttribute
+            ?? throw new InvalidOperationException($"type {type.Name} is not reflected");
+        _classAttributeCache[type] = classAttribute;
 
         var objectInstance = Activator.CreateInstance(type)!;
-        objContext.Instances[address] = objectInstance;
+        objContext.Instances[address] = (objectInstance, type);
 
         if (objectInstance is UObject @object)
         {
             _sourcePointerField.SetValue(@object, address);
             _sourceRemoteField.SetValue(@object, new WeakReference<UDKRemote>(this));
-            _sourceGenerationField!.SetValue(@object, new WeakReference<UDKGeneration>(objContext));
+            _sourceGenerationField.SetValue(@object, new WeakReference<UDKGeneration>(objContext));
         }
 
-        foreach (FieldInfo fieldInfo in type.GetFields())
+        var objectBytes = _objectMemoryPool.Rent(classAttribute.FixedSize);
+        _process.ReadMemoryChecked(address, objectBytes.AsSpan()[..classAttribute.FixedSize]);
+
+        if (!_fieldArrayCache.TryGetValue(type, out (FieldInfo, UFieldAttribute)[]? typeFields))
         {
-            // Fields on reflected types are allowed to not be reflected.
-            if (fieldInfo.GetCustomAttribute(typeof(UFieldAttribute)) is UFieldAttribute fieldAttribute)
+            IEnumerable<(FieldInfo, UFieldAttribute)> enumerateReflectedFields()
             {
-                var fieldValue = ReadReflectedField(objectBytes, objectInstance, null, fieldInfo, fieldAttribute, refQueue);
-                fieldInfo.SetValueDirect(__makeref(objectInstance), fieldValue!);
+                foreach (FieldInfo fieldInfo in type.GetFields())
+                {
+                    // Fields on reflected types are allowed to not be reflected.
+                    if (fieldInfo.GetCustomAttribute(typeof(UFieldAttribute)) is UFieldAttribute fieldAttribute)
+                        yield return (fieldInfo, fieldAttribute);
+                }
             }
+
+            typeFields = enumerateReflectedFields().ToArray();
+            _fieldArrayCache.Add(type, typeFields);
+        }
+
+        foreach (var fieldPair in typeFields!)
+        {
+            (FieldInfo fieldInfo, UFieldAttribute fieldAttribute) = fieldPair;
+            var fieldValue = ReadReflectedField(objectBytes, objectInstance, null, fieldInfo, fieldAttribute, refQueue);
+            fieldInfo.SetValue(objectInstance, fieldValue!);
         }
 
         _objectMemoryPool.Return(objectBytes, clearArray: true);
@@ -754,19 +777,19 @@ public sealed class UDKRemote : IDisposable
 
     object? ReadReflectedInstance(Type type, IntPtr address, UDKGeneration objContext, Queue<RefQueueItem> refQueue)
     {
-        var instance = ReadReflectedInstanceInternal(type, address, null, objContext, refQueue, out var classAttribute);
+        var instance = ReadReflectedInstanceInternal(type, address, objContext, refQueue, out var classAttribute);
         if (instance is null) return default;
 
         while (refQueue.TryDequeue(out RefQueueItem item))
         {
             var (outer, field, qtype, pointer, index) = item;
-            var valueInstance = ReadReflectedInstanceInternal(qtype, pointer, index, objContext, refQueue, out var valueClassAttribute);
+            var valueInstance = ReadReflectedInstanceInternal(qtype, pointer, objContext, refQueue, out var valueClassAttribute);
 
             if (valueInstance is null) continue;
 
             if (CheckNeedsDowncast(valueInstance, valueClassAttribute.Name, out Type valueLowerType))
             {
-                refQueue.Enqueue(new RefQueueItem(outer, field, valueLowerType, pointer, index));
+                refQueue.Enqueue(new(outer, field, valueLowerType, pointer, index));
                 continue;
             }
 
@@ -782,8 +805,8 @@ public sealed class UDKRemote : IDisposable
                 array.SetValue(valueInstance, index.Value!);
             }
 
-            if (CheckNeedsRevisit(valueInstance, valueClassAttribute.Name, out valueLowerType))
-                refQueue.Enqueue(new RefQueueItem(outer, field, valueLowerType, pointer, index));
+            if (CheckNeedsRevisit(valueInstance, valueClassAttribute.Name))
+                refQueue.Enqueue(new(outer, field, valueInstance.GetType(), pointer, index));
         }
 
         if (CheckNeedsDowncast(instance, classAttribute.Name, out var lowerType))
@@ -838,17 +861,8 @@ public sealed class UDKRemote : IDisposable
         return false;
     }
 
-    static bool CheckNeedsRevisit(object checkedInstance, string staticClassName, out Type lowerType)
-    {
-        if (checkedInstance is UObject @object && @object.Class is null)
-        {
-            lowerType = @object.GetType();
-            return true;
-        }
-
-        lowerType = typeof(void);
-        return false;
-    }
+    static bool CheckNeedsRevisit(object checkedInstance, string staticClassName)
+        => checkedInstance is UObject @object && @object.Class is null;
 
     #endregion
 

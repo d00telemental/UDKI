@@ -18,7 +18,7 @@ public class UDKGeneration : IDisposable
     /// <summary>
     /// Maps pointer within process memory to a deserialized instance of a reflected type.
     /// </summary>
-    public Dictionary<IntPtr, object> Instances { get; } = [];
+    public Dictionary<IntPtr, (object, Type)> Instances { get; } = [];
 
 
     public UDKGeneration(ProcessHandle processHandle, bool freezeThreads = false)
