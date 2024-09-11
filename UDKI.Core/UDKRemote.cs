@@ -538,7 +538,14 @@ public sealed class UDKRemote : IDisposable
 
 
     /// <summary>Data (always) required for reading a field.</summary>
-    internal record struct FieldContext(UDKGeneration Generation, bool AsFName = false, uint BitMask = uint.MaxValue);
+    internal record struct FieldContext(
+        UDKGeneration Generation, 
+        bool AsFName = false, 
+        uint BitMask = uint.MaxValue, 
+        UScriptStruct? Struct = null,
+        UFunction? Delegate = null,
+        UClass? Interface = null
+    );
 
     /// <summary>Data required for reading an <see cref="UArrayProperty"/> field.</summary>
     internal record ArrayFieldContext(int FieldSize, ArrayFieldContext? Inner);
@@ -592,6 +599,36 @@ public sealed class UDKRemote : IDisposable
             };
         }
 
+        if (valueType == typeof(FScriptDelegate))
+        {
+            var objectPointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes[0..8]);
+            var funcName = new FName(bytes[8..16]);
+
+            var fieldValue = new FScriptDelegate()
+            {
+                Object = ReadReflectedInstance<UObject>(objectPointer, context.Generation),
+                FunctionName = ReadName(funcName),
+                StaticFunction = context.Delegate,
+            };
+
+            return fieldValue;
+        }
+
+        if (valueType == typeof(FScriptInterface))
+        {
+            var objectPointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes[0..8]);
+            var interfacePointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes[8..16]);
+
+            var fieldValue = new FScriptInterface()
+            {
+                Object = ReadReflectedInstance<UObject>(objectPointer, context.Generation),
+                Interface = interfacePointer,
+                StaticInterfaceClass = context.Interface,
+            };
+
+            return fieldValue;
+        }
+
         if (valueType == typeof(string))
         {
             if (context.AsFName)
@@ -633,6 +670,27 @@ public sealed class UDKRemote : IDisposable
             }
 
             return fieldValue;
+        }
+
+        if (valueType == typeof(DynamicScriptStruct) && context.Struct is UScriptStruct fieldStruct)
+        {
+            var structSlice = bytes[..fieldStruct.PropertiesSize];
+
+            if (fieldStruct.SuperStruct is not null)
+            {
+                // To the best of my knowledge, this should *never* be the case.
+                throw new InvalidDataException($"{fieldStruct} has non-null super struct");
+            }
+
+            DynamicScriptStruct structInstance = new() { _struct = fieldStruct };
+
+            foreach (var property in fieldStruct.GetProperties(bWithSuper: false))
+            {
+                var fieldValue = ReadPropertyInternal(structSlice, null, context.Generation, property);
+                structInstance._fields.Add(property.Name, fieldValue);
+            }
+
+            return structInstance;
         }
 
         if (valueType.IsClass)
@@ -702,13 +760,13 @@ public sealed class UDKRemote : IDisposable
             UBoolProperty prop => (typeof(bool), new FieldContext(generation, BitMask: prop.BitMask), null),
             UStrProperty => (typeof(string), new FieldContext(generation), null),
             UNameProperty => (typeof(string), new FieldContext(generation, AsFName: true), null),
-            //UDelegateProperty => throw new NotImplementedException(),
+            UDelegateProperty prop => (typeof(FScriptDelegate), new FieldContext(generation, Delegate: prop.Function), null),
             UObjectProperty or UClassProperty or UComponentProperty => (typeof(UObject), new FieldContext(generation), null),
-            //UInterfaceProperty => throw new NotImplementedException(),
-            //UStructProperty => throw new NotImplementedException(),
+            UInterfaceProperty prop => (typeof(FScriptInterface), new FieldContext(generation, Interface: prop.InterfaceClass), null),
+            UStructProperty prop => (typeof(DynamicScriptStruct), new FieldContext(generation, Struct: prop.Struct), null),
             UArrayProperty prop => MapPropertyType(generation, prop.Inner!),
             //UMapProperty => throw new NotImplementedException(),
-            _ => throw new NotImplementedException(),
+            _ => throw new NotImplementedException($"{property.Class!.Name} is not supported"),
         };
 
         if (property is UArrayProperty arrayProperty)

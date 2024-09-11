@@ -1,5 +1,6 @@
 ﻿using System.Buffers.Binary;
 using System.Data;
+using System.Dynamic;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -104,6 +105,42 @@ public struct FNameEntry
         Flags = BinaryPrimitives.ReadUInt64LittleEndian(view[0..8]);
         HashIndex = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
         HashNext = BinaryPrimitives.ReadIntPtrLittleEndian(view[12..20]);
+    }
+}
+
+/// <summary>
+/// Structure of an Unreal <c>FScriptDelegate</c>.
+/// It is INCOMPATIBLE with in-memory layout, and MUST NOT be marshalled via native .NET utilities.
+/// </summary>
+public struct FScriptDelegate
+{
+    public UObject? Object = null;
+    public string FunctionName = string.Empty;
+
+    // This comes from UDelegateProperty, not serialized data.
+    public UFunction? StaticFunction = null;
+
+    public FScriptDelegate()
+    {
+        // ...
+    }
+}
+
+/// <summary>
+/// Structure of an Unreal <c>FScriptInterface</c>.
+/// It is INCOMPATIBLE with in-memory layout, and MUST NOT be marshalled via native .NET utilities.
+/// </summary>
+public struct FScriptInterface
+{
+    public UObject? Object = null;
+    public IntPtr Interface = IntPtr.Zero;
+
+    // This comes from UInterfaceProperty, not serialized data.
+    public UClass? StaticInterfaceClass = null;
+
+    public FScriptInterface()
+    {
+        // ...
     }
 }
 
@@ -257,6 +294,20 @@ public enum EPropertyFlags : ulong
 }
 
 [Flags]
+public enum EStructFlags : uint
+{
+    Native = 0x00000001,
+    Export = 0x00000002,
+    HasComponents = 0x00000004,
+    Transient = 0x00000008,
+    Atomic = 0x00000010,
+    Immutable = 0x00000020,
+    StrictConfig = 0x00000040,
+    ImmutableWhenCooked = 0x00000080,
+    AtomicWhenCooked = 0x00000100,
+}
+
+[Flags]
 public enum EStateFlags : uint
 {
     Editable = 0x00000001,
@@ -344,6 +395,58 @@ public class FStackFrame : FFrame
 #endregion
 
 
+#region ScriptStruct implementation.
+
+/// <summary>Stores and provides dynamic access to properties of a serialized <see cref="UScriptStruct"/>.</summary>
+/// <remarks>Make sure to assign values of this type to <c>dynamic</c> variables to be able to use dynamic member lookup.</remarks>
+public sealed class DynamicScriptStruct : DynamicObject
+{
+    internal Dictionary<string, object?> _fields = [];
+    internal UScriptStruct? _struct = null;
+
+    internal DynamicScriptStruct() { }
+
+    public UScriptStruct Struct => _struct!;
+
+    public override bool TryGetMember(GetMemberBinder binder, out object? result)
+    {
+        if (_fields.TryGetValue(binder.Name, out result)) return true;
+        throw new KeyNotFoundException($"can't find member '{binder.Name}' in {_struct}");
+    }
+
+    public override bool TrySetMember(SetMemberBinder binder, object? value)
+        => throw new InvalidOperationException("ScriptStruct members are read-only");
+
+    public override string ToString()
+    {
+        StringBuilder stringBuilder = new();
+
+        stringBuilder.Append(_struct?.Name);
+        stringBuilder.Append('(');
+
+        foreach ((string name, object? value) in _fields)
+        {
+            stringBuilder.Append(name);
+            stringBuilder.Append('=');
+            stringBuilder.Append(value?.ToString() ?? "(null)");
+            stringBuilder.Append(", ");
+        }
+
+        if (_fields.Count != 0)
+        {
+            // Chop off the trailing comma.
+            stringBuilder.Remove(stringBuilder.Length - 2, 2);
+        }
+
+        stringBuilder.Append(')');
+
+        return stringBuilder.ToString();
+    }
+}
+
+#endregion
+
+
 #region UObject hierarchy.
 
 [UClass("Object", fixedSize: 0x60)]
@@ -385,6 +488,12 @@ public class UObject
 
     public UObject GetOutermost() => GetOuterChain().Last();
 
+    public UProperty GetProperty(string name)
+    {
+        return Class?.GetProperties(true).FirstOrDefault(p => p.Name == name)
+            ?? throw new KeyNotFoundException($"property '{name}' is not present on '{this}'");
+    }
+
     public object? GetPropertyValue(string name, Type? checkType = null)
     {
         if (!_sourceRemote!.TryGetTarget(out UDKRemote? sourceRemote))
@@ -393,14 +502,39 @@ public class UObject
         if (!_sourceGeneration!.TryGetTarget(out UDKGeneration? sourceGeneration))
             throw new InvalidOperationException();
 
-        UProperty property = Class?.GetProperties(true).FirstOrDefault(p => p.Name == name)
-            ?? throw new KeyNotFoundException($"property '{name}' is not present on '{this}'");
-
+        UProperty property = GetProperty(name);
         _cachedBytes ??= sourceRemote.ReadObjectBytes(this);
         return sourceRemote.ReadPropertyInternal(_cachedBytes, checkType, sourceGeneration, property);
     }
 
     public T GetPropertyValue<T>(string name) => (T)GetPropertyValue(name, typeof(T))!;
+
+    public void ForEachProperty(bool bWithSuper, Func<UProperty, bool> propertyCallback)
+    {
+        foreach (var property in Class!.GetProperties(bWithSuper))
+        {
+            if (!propertyCallback(property))
+                break;
+        }
+    }
+
+    public void ForEachPropertyValue(bool bWithSuper, Func<UProperty, object?, bool> propertyCallback)
+    {
+        if (!_sourceRemote!.TryGetTarget(out UDKRemote? sourceRemote))
+            throw new InvalidOperationException();
+
+        if (!_sourceGeneration!.TryGetTarget(out UDKGeneration? sourceGeneration))
+            throw new InvalidOperationException();
+
+        _cachedBytes ??= sourceRemote.ReadObjectBytes(this);
+
+        foreach (var property in Class!.GetProperties(bWithSuper))
+        {
+            var value = sourceRemote.ReadPropertyInternal(_cachedBytes, null, sourceGeneration, property);
+            if (!propertyCallback(property, value))
+                break;
+        }
+    }
 
     public UFunction? FindFunction(string funcName, bool bGlobalOnly = false)
     {
@@ -618,7 +752,7 @@ public class UScriptStruct : UStruct
     [UField("DefaultStructPropText", 0xD0)]
     public string DefaultStructPropText = string.Empty;
     [UField("StructFlags", 0xE0)]
-    public int StructFlags;
+    public EStructFlags StructFlags;
     [UField("StructDefaults", 0xE4)]
     public byte[]? StructDefaults;
 }

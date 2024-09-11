@@ -39,13 +39,10 @@ try
     using var remote = new UDKRemote();
     using var generation = remote.CreateGeneration();
 
-    var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation)!;
+    var controller = remote.FindObjectTyped<UObject>("SimplePC_0", generation)!;
+    dynamic location = controller.GetPropertyValue<DynamicScriptStruct>("Location");
 
-    var typed = console.GetPropertyValue<string>("TypedStr");
-    var scrollback = console.GetPropertyValue<string[]>("Scrollback");
-
-    foreach (var line in scrollback)
-        println(line);
+    println($"player location = ({location.X}, {location.Y}, {location.Z})");
 
     Debugger.Break();
 }
