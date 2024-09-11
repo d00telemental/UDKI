@@ -2,11 +2,9 @@
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Security.Claims;
 using System.Text;
 
 using Iced.Intel;
-using Microsoft.VisualBasic.FileIO;
 using static Iced.Intel.AssemblerRegisters;
 
 
@@ -43,10 +41,10 @@ public sealed class UDKRemote : IDisposable
 
     readonly IntPtr _addressObjects;
     readonly IntPtr _addressNames;
+    readonly IntPtr _addressClassClass;
     readonly IntPtr _addressFNameInit;
     readonly IntPtr _addressStaticFindObject;
     readonly IntPtr _addressStaticFindObjectFastInternal;
-    readonly IntPtr _addressClassClass;
 
     /// <summary>Number of bytes allocated for internal parameters buffer.</summary>
     public const int InputBufferSize = 1024;
@@ -90,16 +88,27 @@ public sealed class UDKRemote : IDisposable
         _sourceRemoteField = typeof(UObject).GetField("_sourceRemote", BindingFlags.NonPublic | BindingFlags.Instance)!;
         _sourceGenerationField = typeof(UObject).GetField("_sourceGeneration", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
-        _addressObjects = ResolveMainOffset(UDKOffsets.GObjObjects);
-        _addressNames = ResolveMainOffset(UDKOffsets.Names);
-        _addressFNameInit = ResolveMainOffset(0x268090);
-        _addressStaticFindObject = ResolveMainOffset(0x270520);
-        _addressStaticFindObjectFastInternal = ResolveMainOffset(0x270280);
-        _addressClassClass = ReadPointer(ResolveMainOffset(0x356D860));
+        _addressObjects = ResolveOffset(UDKOffsets.Objects);
+        _addressNames = ResolveOffset(UDKOffsets.Names);
+        _addressClassClass = ReadPointer(ResolveOffset(UDKOffsets.ClassClass));
+        _addressFNameInit = ResolveOffset(UDKOffsets.FNameInit);
+        _addressStaticFindObject = ResolveOffset(UDKOffsets.StaticFindObject);
+        _addressStaticFindObjectFastInternal = ResolveOffset(UDKOffsets.StaticFindObjectFastInternal);
     }
 
     public UDKRemote() : this(ProcessHandle.FindUDK(), true) { }
     public UDKRemote(ProcessHandle process) : this(process, false) { }
+
+
+    /// <summary>
+    /// Resolves a memory offset relative to the main module base into an absolute pointer.
+    /// </summary>
+    public IntPtr ResolveOffset(IntPtr offset) => _process.MainModule.BaseAddress + offset;
+
+    /// <summary>
+    /// Constructs a new access generation, optionally freezing remote threads for the duration of its lifetime.
+    /// </summary>
+    public UDKGeneration CreateGeneration(bool freezeThreads = false) => new(_process, freezeThreads);
 
 
     #region IDisposable implementation.
@@ -136,18 +145,7 @@ public sealed class UDKRemote : IDisposable
     #endregion
 
 
-    /// <summary>
-    /// Resolves a memory offset relative to the main module base into an absolute pointer.
-    /// </summary>
-    public IntPtr ResolveMainOffset(IntPtr offset) => _process.MainModule.BaseAddress + offset;
-
-    /// <summary>
-    /// Constructs a new access generation, optionally freezing remote threads for the duration of its lifetime.
-    /// </summary>
-    public UDKGeneration CreateGeneration(bool freezeThreads = false) => new(_process, freezeThreads);
-
-
-    #region Code execution internals.
+    #region Code execution.
 
     static int AlignToMultiple(int value, int align) => (value + align - 1) / align * align;
 
@@ -178,9 +176,6 @@ public sealed class UDKRemote : IDisposable
         asm.Assemble(new StreamCodeWriter(stream), rip);
         return stream.ToArray();
     }
-
-    #endregion
-
 
     /// <summary>Executes a manually-constructed piece of assembly code in a new remote thread, without input or output data.</summary>
     /// <param name="writeAssemblyBody">Callback that generates body of code to execute.</param>
@@ -240,8 +235,10 @@ public sealed class UDKRemote : IDisposable
         }
     }
 
+    #endregion
 
-    #region Value allocation and search.
+
+    #region Allocation and search.
 
     /// <summary>Looks up or inserts an <c>FName</c> by string.</summary>
     /// <param name="value">String value.</param>
@@ -400,6 +397,10 @@ public sealed class UDKRemote : IDisposable
 
     #region Value reading.
 
+    const int FArraySize = 16;
+    const int FNameSize = 8;
+    const int IntPtr64Size = 8;
+
     /// <summary>
     /// Reads <c>FArray</c> / <c>TArray</c> components.
     /// </summary>
@@ -510,6 +511,19 @@ public sealed class UDKRemote : IDisposable
         return name.NumberPlusOne == 0 ? entry.Text : $"{entry.Text}_{name.NumberPlusOne - 1}";
     }
 
+    /// <summary>
+    /// Reads number of <see cref="UObject"/> pointers in the <c>UObject::GObjObjects</c> array.
+    /// </summary>
+    public int ReadObjectCount() => ReadArray(_addressObjects).Count;
+
+
+    /// <summary>
+    /// Reads a pointer value found at a given <c>address</c>.
+    /// </summary>
+    /// <param name="address">Absolute offset to the pointer's bytes.</param>
+    /// <param name="bCheckNull">Whether pointer needs to be checked for being null.</param>
+    /// <returns>Deserialized pointer value.</returns>
+    /// <exception cref="InvalidDataException">When <c>bCheckNull</c> is set and returned value is zero.</exception>
     public IntPtr ReadPointer(IntPtr address, bool bCheckNull = false)
     {
         Span<byte> bytes = stackalloc byte[IntPtr64Size];
@@ -522,17 +536,12 @@ public sealed class UDKRemote : IDisposable
         return pointer;
     }
 
-    #endregion
 
-
-    #region Field reading internals.
-
-    internal const int FArraySize = 16;
-    internal const int FNameSize = 8;
-    internal const int IntPtr64Size = 8;
-
+    /// <summary>Data (always) required for reading a field.</summary>
     record struct FieldContext(UDKGeneration Generation, bool AsFName = false, uint BitMask = uint.MaxValue);
-    record struct ReflectedFieldContext(object Instance, FieldInfo Field, int? Index, Queue<RefQueueItem> RefQueue);
+    /// <summary>Data required for reading a field within a <see cref="ReadReflectedInstance(Type, nint, UDKGeneration)"/> call tree.</summary>
+    record struct ReflectedFieldContext(object Instance, FieldInfo Field, int? Index, Queue<RefQueueItem> Queue);
+
 
     static int GetValueSize(Type valueType, FieldContext fieldContext)
     {
@@ -618,7 +627,7 @@ public sealed class UDKRemote : IDisposable
             {
                 // We only have a ReflectedFieldContext when in a ReadReflectedInstance call tree,
                 // which means we must push references to a queue defined somewhere up the call stack.
-                rctx.RefQueue.Enqueue(new(rctx.Instance, rctx.Field, valueType, fieldPointer, rctx.Index));
+                rctx.Queue.Enqueue(new(rctx.Instance, rctx.Field, valueType, fieldPointer, rctx.Index));
                 return null;
             }
             else
@@ -654,6 +663,8 @@ public sealed class UDKRemote : IDisposable
     #endregion
 
 
+    #region Property reading.
+
     internal byte[] ReadObjectBytes(UObject instance)
     {
         var objectBytes = new byte[instance.Class!.PropertiesSize];
@@ -686,8 +697,10 @@ public sealed class UDKRemote : IDisposable
         return fieldValue;
     }
 
+    #endregion
 
-    #region Instance reading internals.
+
+    #region Instance reading.
 
     object? ReadReflectedInstanceInternal(Type type, IntPtr address, UDKGeneration generation,
         Queue<RefQueueItem> refQueue, out UClassAttribute classAttribute)
@@ -851,9 +864,6 @@ public sealed class UDKRemote : IDisposable
         return false;
     }
 
-    #endregion
-
-
     /// <summary>Deserializes an instance of a reflected type passed as a <see cref="Type"/> value.</summary>
     /// <param name="type">Type value annotated with reflection attributes (<see cref="UClassAttribute"/>, <see cref="UFieldAttribute"/>).</param>
     /// <param name="address">Remote object pointer (as an absolute offset).</param>
@@ -869,4 +879,7 @@ public sealed class UDKRemote : IDisposable
     /// <returns>Deserialized object cast to <c>T</c>.</returns>
     public T? ReadReflectedInstance<T>(IntPtr address, UDKGeneration generation)
         => (T?)ReadReflectedInstance(typeof(T), address, generation);
+
+    #endregion
+
 }
