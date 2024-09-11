@@ -385,7 +385,7 @@ public class UObject
 
     public UObject GetOutermost() => GetOuterChain().Last();
 
-    public object? GetPropertyValue(string name)
+    public object? GetPropertyValue(string name, Type? checkType = null)
     {
         if (!_sourceRemote!.TryGetTarget(out UDKRemote? sourceRemote))
             throw new InvalidOperationException();
@@ -396,13 +396,11 @@ public class UObject
         UProperty property = Class?.GetProperties(true).FirstOrDefault(p => p.Name == name)
             ?? throw new KeyNotFoundException($"property '{name}' is not present on '{this}'");
 
-        // Bytes are lazily initialized to avoid copying entire game memory.
         _cachedBytes ??= sourceRemote.ReadObjectBytes(this);
-
-        return sourceRemote.ReadPropertyInternal(_cachedBytes, sourceGeneration, property);
+        return sourceRemote.ReadPropertyInternal(_cachedBytes, checkType, sourceGeneration, property);
     }
 
-    public T GetPropertyValue<T>(string name) => (T)GetPropertyValue(name)!;
+    public T GetPropertyValue<T>(string name) => (T)GetPropertyValue(name, typeof(T))!;
 
     public UFunction? FindFunction(string funcName, bool bGlobalOnly = false)
     {
@@ -725,6 +723,12 @@ public class UClassProperty : UObjectProperty
 {
     [UField("MetaClass", 0xB0)]
     public UClass? MetaClass;
+}
+
+[UClass("ComponentProperty", fixedSize: 0xB0)]
+public class UComponentProperty : UObjectProperty
+{
+    // ...
 }
 
 [UClass("InterfaceProperty", fixedSize: 0xB0)]

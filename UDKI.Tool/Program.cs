@@ -41,8 +41,11 @@ try
 
     var console = remote.FindObjectTyped<UObject>("Console'UTConsole_0'", generation)!;
 
-    println($"currently typed string = {console.GetPropertyValue<string>("TypedStr")}");
-    println($"max scrollback size = {console.GetPropertyValue<int>("MaxScrollbackSize")}");
+    var typed = console.GetPropertyValue<string>("TypedStr");
+    var scrollback = console.GetPropertyValue<string[]>("Scrollback");
+
+    foreach (var line in scrollback)
+        println(line);
 
     Debugger.Break();
 }

@@ -16,7 +16,7 @@ namespace UDKI.Core;
 /// </summary>
 public sealed class UDKRemote : IDisposable
 {
-    record struct RefQueueItem(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
+    internal record struct RefQueueItem(object Outer, FieldInfo Field, Type Type, nint Address, int? ArrayIndex);
 
     readonly ProcessHandle _process;
     readonly UDKGeneration _generation;
@@ -538,9 +538,13 @@ public sealed class UDKRemote : IDisposable
 
 
     /// <summary>Data (always) required for reading a field.</summary>
-    record struct FieldContext(UDKGeneration Generation, bool AsFName = false, uint BitMask = uint.MaxValue);
+    internal record struct FieldContext(UDKGeneration Generation, bool AsFName = false, uint BitMask = uint.MaxValue);
+
+    /// <summary>Data required for reading an <see cref="UArrayProperty"/> field.</summary>
+    internal record ArrayFieldContext(int FieldSize, ArrayFieldContext? Inner);
+
     /// <summary>Data required for reading a field within a <see cref="ReadReflectedInstance(Type, nint, UDKGeneration)"/> call tree.</summary>
-    record struct ReflectedFieldContext(object Instance, FieldInfo Field, int? Index, Queue<RefQueueItem> Queue);
+    internal record struct ReflectedFieldContext(object Instance, FieldInfo Field, int? Index, Queue<RefQueueItem> Queue);
 
 
     static int GetValueSize(Type valueType, FieldContext fieldContext)
@@ -559,7 +563,8 @@ public sealed class UDKRemote : IDisposable
         };
     }
 
-    object? ReadFieldValue(ReadOnlySpan<byte> bytes, Type valueType, FieldContext context, ReflectedFieldContext? reflectedContext)
+    object? ReadFieldValue(ReadOnlySpan<byte> bytes, Type valueType, FieldContext context,
+        ArrayFieldContext? arrayContext, ReflectedFieldContext? reflectedContext)
     {
         if (valueType == typeof(sbyte)) return (sbyte)bytes[0];
         if (valueType == typeof(byte)) return bytes[0];
@@ -571,6 +576,21 @@ public sealed class UDKRemote : IDisposable
         if (valueType == typeof(ulong)) return BinaryPrimitives.ReadUInt64LittleEndian(bytes[..sizeof(ulong)]);
         if (valueType == typeof(IntPtr)) return BinaryPrimitives.ReadIntPtrLittleEndian(bytes[..IntPtr64Size]);
         if (valueType == typeof(UIntPtr)) return BinaryPrimitives.ReadUIntPtrLittleEndian(bytes[..IntPtr64Size]);
+        if (valueType == typeof(float)) return BinaryPrimitives.ReadSingleLittleEndian(bytes[..sizeof(float)]);
+        if (valueType == typeof(double)) return BinaryPrimitives.ReadDoubleLittleEndian(bytes[..sizeof(double)]);
+
+        if (valueType == typeof(bool))
+        {
+            var fieldInteger = BinaryPrimitives.ReadUInt32LittleEndian(bytes[..sizeof(uint)]);
+            var fieldValue = fieldInteger & context.BitMask;
+
+            return fieldValue switch
+            {
+                0 => false,
+                uint value when value == context.BitMask => true,
+                uint value => throw new InvalidDataException($"weird boolean value: {value}")
+            };
+        }
 
         if (valueType == typeof(string))
         {
@@ -598,17 +618,17 @@ public sealed class UDKRemote : IDisposable
             FArray fieldArray = new(bytes[..FArraySize]);
 
             var elemType = valueType.GetElementType()!;
-            var elemSize = GetValueSize(elemType, context);
-            var elemBuffer = new byte[elemSize];
+            var elemSize = arrayContext?.FieldSize ?? GetValueSize(elemType, context);
 
+            var fieldBuffer = new byte[elemSize];
             var fieldValue = Array.CreateInstance(elemType, fieldArray.Count);
 
             for (var i = 0; i < fieldArray.Count; i++)
             {
                 var itemOffset = fieldArray.GetItemOffset(i, elemSize);
-                _process.ReadMemoryChecked(itemOffset, elemBuffer);
+                _process.ReadMemoryChecked(itemOffset, fieldBuffer);
 
-                var itemValue = ReadFieldValue(elemBuffer, elemType, context, reflectedContext);
+                var itemValue = ReadFieldValue(fieldBuffer, elemType, context, arrayContext?.Inner, reflectedContext);
                 fieldValue.SetValue(itemValue, i);
             }
 
@@ -672,29 +692,45 @@ public sealed class UDKRemote : IDisposable
         return objectBytes;
     }
 
-    internal object? ReadPropertyInternal(ReadOnlySpan<byte> objectBytes, UDKGeneration generation, UProperty property)
+    internal (Type Type, FieldContext Context, ArrayFieldContext? Array) MapPropertyType(UDKGeneration generation, UProperty property)
     {
-        (Type fieldType, FieldContext fieldContext) = property switch
+        (Type type, FieldContext context, ArrayFieldContext? array) = property switch
         {
-            UByteProperty => (typeof(byte), new FieldContext(generation)),
-            UIntProperty => (typeof(int), new FieldContext(generation)),
-            UFloatProperty => (typeof(float), new FieldContext(generation)),
-            UBoolProperty prop => (typeof(bool), new FieldContext(generation, BitMask: prop.BitMask)),
-            UStrProperty => (typeof(string), new FieldContext(generation)),
-            UNameProperty => (typeof(string), new FieldContext(generation, AsFName: true)),
+            UByteProperty => (typeof(byte), new FieldContext(generation), null),
+            UIntProperty => (typeof(int), new FieldContext(generation), null),
+            UFloatProperty => (typeof(float), new FieldContext(generation), null),
+            UBoolProperty prop => (typeof(bool), new FieldContext(generation, BitMask: prop.BitMask), null),
+            UStrProperty => (typeof(string), new FieldContext(generation), null),
+            UNameProperty => (typeof(string), new FieldContext(generation, AsFName: true), null),
             //UDelegateProperty => throw new NotImplementedException(),
-            UObjectProperty or UClassProperty => (typeof(UObject), new FieldContext(generation)),
+            UObjectProperty or UClassProperty or UComponentProperty => (typeof(UObject), new FieldContext(generation), null),
             //UInterfaceProperty => throw new NotImplementedException(),
             //UStructProperty => throw new NotImplementedException(),
-            //UArrayProperty => throw new NotImplementedException(),
+            UArrayProperty prop => MapPropertyType(generation, prop.Inner!),
             //UMapProperty => throw new NotImplementedException(),
             _ => throw new NotImplementedException(),
         };
 
-        ReadOnlySpan<byte> fieldSlice = objectBytes[property.Offset..];
-        object? fieldValue = ReadFieldValue(fieldSlice, fieldType, fieldContext, null);
+        if (property is UArrayProperty arrayProperty)
+        {
+            type = type.MakeArrayType();
+            array = new(arrayProperty.Inner!.ElementSize, array);
+        }
 
-        return fieldValue;
+        return (type, context, array);
+    }
+
+    internal object? ReadPropertyInternal(ReadOnlySpan<byte> objectBytes, Type? checkType, UDKGeneration generation, UProperty property)
+    {
+        ReadOnlySpan<byte> slice = objectBytes[property.Offset..];
+
+        var field = MapPropertyType(generation, property);
+        var value = ReadFieldValue(slice, field.Type, field.Context, field.Array, null);
+
+        if (checkType is not null && checkType != field.Type)
+            throw new ArgumentException($"resolved property type {field.Type}, expected {checkType}");
+
+        return value;
     }
 
     #endregion
@@ -765,7 +801,7 @@ public sealed class UDKRemote : IDisposable
             ReflectedFieldContext reflectedContext = new(objectInstance, fieldInfo, null, refQueue);
 
             var fieldSlice = objectBytes.AsSpan()[fieldAttribute.FixedOffset..];
-            var fieldValue = ReadFieldValue(fieldSlice, fieldInfo.FieldType, context, reflectedContext);
+            var fieldValue = ReadFieldValue(fieldSlice, fieldInfo.FieldType, context, null, reflectedContext);
 
             fieldInfo.SetValue(objectInstance, fieldValue!);
         }
@@ -845,6 +881,7 @@ public sealed class UDKRemote : IDisposable
                     "DelegateProperty" => typeof(UDelegateProperty),
                     "ObjectProperty" => typeof(UObjectProperty),
                     "ClassProperty" => typeof(UClassProperty),
+                    "ComponentProperty" => typeof(UComponentProperty),
                     "InterfaceProperty" => typeof(UInterfaceProperty),
                     "StructProperty" => typeof(UStructProperty),
                     "ArrayProperty" => typeof(UArrayProperty),
