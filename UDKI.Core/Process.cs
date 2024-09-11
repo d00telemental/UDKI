@@ -25,7 +25,7 @@ public class ProcessHandle : IDisposable
         }
         catch (InvalidOperationException exception)
         {
-            throw new Exception("failed to find process by name", exception);
+            throw new Exception("failed to find udk process by name", exception);
         }
     }
 

@@ -684,10 +684,10 @@ public sealed class UDKRemote : IDisposable
 
             DynamicScriptStruct structInstance = new() { _struct = fieldStruct };
 
-            foreach (var property in fieldStruct.GetProperties(bWithSuper: false))
+            foreach (var fieldProperty in fieldStruct.GetProperties(bWithSuper: false))
             {
-                var fieldValue = ReadPropertyInternal(structSlice, null, context.Generation, property);
-                structInstance._fields.Add(property.Name, fieldValue);
+                var fieldValue = ReadPropertyInternal(structSlice, null, fieldProperty, context.Generation);
+                structInstance._fields.Add(fieldProperty.Name, fieldValue);
             }
 
             return structInstance;
@@ -741,16 +741,12 @@ public sealed class UDKRemote : IDisposable
     #endregion
 
 
-    #region Property reading.
+    #region Property reading / writing.
 
-    internal byte[] ReadObjectBytes(UObject instance)
-    {
-        var objectBytes = new byte[instance.Class!.PropertiesSize];
-        _process.ReadMemoryChecked(instance._sourcePointer, objectBytes);
-        return objectBytes;
-    }
+    internal bool CheckPropertyOwnership(UProperty property)
+        => (property._sourceRemote?.TryGetTarget(out var checkRemote) ?? false) && checkRemote == this;
 
-    internal (Type Type, FieldContext Context, ArrayFieldContext? Array) MapPropertyType(UDKGeneration generation, UProperty property)
+    internal static (Type Type, FieldContext Context, ArrayFieldContext? Array) MapPropertyType(UDKGeneration generation, UProperty property)
     {
         (Type type, FieldContext context, ArrayFieldContext? array) = property switch
         {
@@ -778,8 +774,16 @@ public sealed class UDKRemote : IDisposable
         return (type, context, array);
     }
 
-    internal object? ReadPropertyInternal(ReadOnlySpan<byte> objectBytes, Type? checkType, UDKGeneration generation, UProperty property)
+    internal byte[] ReadObjectBytes(UObject instance)
     {
+        var objectBytes = new byte[instance.Class!.PropertiesSize];
+        _process.ReadMemoryChecked(instance._sourcePointer, objectBytes);
+        return objectBytes;
+    }
+
+    internal object? ReadPropertyInternal(ReadOnlySpan<byte> objectBytes, Type? checkType, UProperty property, UDKGeneration generation)
+    {
+        Debug.Assert(CheckPropertyOwnership(property), "property does not belong to this remote");
         ReadOnlySpan<byte> slice = objectBytes[property.Offset..];
 
         var field = MapPropertyType(generation, property);
@@ -789,6 +793,17 @@ public sealed class UDKRemote : IDisposable
             throw new ArgumentException($"resolved property type {field.Type}, expected {checkType}");
 
         return value;
+    }
+
+    internal void WritePropertyInternal(Span<byte> objectBytes, object? fieldValue, UProperty property, UDKGeneration generation)
+    {
+        Debug.Assert(CheckPropertyOwnership(property), "property does not belong to this remote");
+        Span<byte> slice = objectBytes[property.Offset..];
+
+        var field = MapPropertyType(generation, property);
+        // TODO: Continue property serialization...
+
+        throw new NotImplementedException();
     }
 
     #endregion
