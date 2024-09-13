@@ -398,7 +398,7 @@ public sealed class UDKRemote : IDisposable
     public void InitArray(ref FArray array, int count, int granularity = 32)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(count);
-        ArgumentOutOfRangeException.ThrowIfLessThan(1, granularity);
+        ArgumentOutOfRangeException.ThrowIfLessThan(granularity, 1);
         
         array.Count = count;
         if (array.Allocation == IntPtr.Zero)
@@ -740,12 +740,10 @@ public sealed class UDKRemote : IDisposable
         if (valueType == typeof(FScriptDelegate))
         {
             var objectPointer = BinaryPrimitives.ReadIntPtrLittleEndian(bytes[0..8]);
-            var funcName = new FName(bytes[8..16]);
-
             var fieldValue = new FScriptDelegate()
             {
                 Object = ReadReflectedInstance<UObject>(objectPointer, context.Generation),
-                FunctionName = ReadName(funcName),
+                FunctionName = ReadName(new FName(bytes[8..16])),
                 StaticFunction = context.Delegate,
             };
 
@@ -878,8 +876,6 @@ public sealed class UDKRemote : IDisposable
     void WriteFieldValue(Span<byte> bytes, object? value, Type valueType, FieldContext context,
         ArrayFieldContext? arrayContext, ReflectedFieldContext? reflectedContext)
     {
-        if (value is null) throw new NotImplementedException("writing null value is not implemented");
-
         if (valueType == typeof(sbyte) && value is sbyte) { bytes[0] = (byte)value; return; }
         if (valueType == typeof(byte) && value is byte) { bytes[0] = (byte)value; return; }
         if (valueType == typeof(short) && value is short) { BinaryPrimitives.WriteInt16LittleEndian(bytes[..sizeof(short)], (short)value); return; }
@@ -905,6 +901,28 @@ public sealed class UDKRemote : IDisposable
             return;
         }
 
+        if (valueType == typeof(FScriptDelegate) && value is FScriptDelegate scriptDelegate)
+        {
+            if (scriptDelegate.StaticFunction != context.Delegate)
+                throw new InvalidDataException("script delegate function doesn't match context");
+
+            BinaryPrimitives.WriteIntPtrLittleEndian(bytes[0..8], scriptDelegate.Object?._sourcePointer ?? IntPtr.Zero);
+            InitName(scriptDelegate.FunctionName).Write(bytes[8..16]);
+
+            return;
+        }
+
+        if (valueType == typeof(FScriptInterface) && value is FScriptInterface scriptInterface)
+        {
+            if (scriptInterface.StaticInterfaceClass != context.Interface)
+                throw new InvalidDataException("script interface class doesn't match context");
+
+            BinaryPrimitives.WriteIntPtrLittleEndian(bytes[0..8], scriptInterface.Object?._sourcePointer ?? IntPtr.Zero);
+            BinaryPrimitives.WriteIntPtrLittleEndian(bytes[8..16], scriptInterface.Interface);
+
+            return;
+        }
+
         if (valueType == typeof(string) && value is string)
         {
             if (context.AsFName)
@@ -920,7 +938,7 @@ public sealed class UDKRemote : IDisposable
             return;
         }
 
-        if (valueType.IsSZArray && value.GetType() == valueType)
+        if (valueType.IsSZArray && value?.GetType() == valueType)
         {
             var elemType = valueType.GetElementType()!;
             var elemSize = arrayContext?.FieldSize ?? GetValueSize(elemType, context);
@@ -943,7 +961,7 @@ public sealed class UDKRemote : IDisposable
             return;
         }
 
-        if (valueType == typeof(DynamicScriptStruct) && value.GetType() == valueType)
+        if (valueType == typeof(DynamicScriptStruct) && value?.GetType() == valueType)
         {
             DynamicScriptStruct structInstance = (DynamicScriptStruct)value;
             if (context.Struct is UScriptStruct fieldStruct && fieldStruct == structInstance._struct)
@@ -966,6 +984,8 @@ public sealed class UDKRemote : IDisposable
             if (value is BaseReflectedType reflectedInstance)
             {
                 var fieldPointer = reflectedInstance._sourcePointer;
+                if (fieldPointer == IntPtr.Zero) throw new InvalidDataException($"reflected pointer for {value} is null");
+
                 BinaryPrimitives.WriteIntPtrLittleEndian(bytes[..IntPtr64Size], fieldPointer);
                 return;
             }
@@ -976,7 +996,7 @@ public sealed class UDKRemote : IDisposable
             }
         }
 
-        if (valueType.IsEnum && value.GetType() == valueType)
+        if (valueType.IsEnum && value?.GetType() == valueType)
         {
             var enumBaseType = Enum.GetUnderlyingType(valueType);
 
@@ -1037,6 +1057,13 @@ public sealed class UDKRemote : IDisposable
         var objectBytes = new byte[instance.Class!.PropertiesSize];
         _process.ReadMemoryChecked(instance._sourcePointer, objectBytes);
         return objectBytes;
+    }
+
+    internal void WriteObjectBytes(UObject instance, ReadOnlySpan<byte> objectBytes)
+    {
+        if (objectBytes.Length != instance.Class!.PropertiesSize)
+            throw new ArgumentException("new byte count didn't match properties size");
+        _process.WriteMemoryChecked(instance._sourcePointer, objectBytes);
     }
 
     internal object? ReadPropertyInternal(ReadOnlySpan<byte> objectBytes, Type? checkType, UProperty property, UDKGeneration generation)

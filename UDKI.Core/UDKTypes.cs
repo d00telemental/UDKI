@@ -509,6 +509,30 @@ public class UObject : BaseReflectedType
     [UField("ObjectArchetype", 0x58)]
     public UObject? ObjectArchetype;
 
+    /// <summary>
+    /// Resets internal buffers used for property serialization such
+    /// that the next read / write call will pull fresh bytes from memory.
+    /// </summary>
+    public virtual void InvalidateBuffers()
+    {
+        _cachedBytes = null;
+    }
+
+    /// <summary>
+    /// Flushes internal buffers to process memory.
+    /// </summary>
+    public virtual void CommitBuffers(bool invalidate = false)
+    {
+        if (_cachedBytes is not null)
+        {
+            if (!_sourceRemote!.TryGetTarget(out UDKRemote? sourceRemote))
+                throw new InvalidOperationException();
+
+            sourceRemote.WriteObjectBytes(this, _cachedBytes);
+            if (invalidate) InvalidateBuffers();
+        }
+    }
+
     public IEnumerable<UObject> GetOuterChain()
     {
         UObject? iterOuter = Outer;
@@ -540,6 +564,25 @@ public class UObject : BaseReflectedType
         return sourceRemote.ReadPropertyInternal(_cachedBytes, checkType, property, sourceGeneration);
     }
 
+    public void SetPropertyValue(string name, object? value, bool commit = false)
+    {
+        if (!_sourceRemote!.TryGetTarget(out UDKRemote? sourceRemote))
+            throw new InvalidOperationException();
+
+        if (!_sourceGeneration!.TryGetTarget(out UDKGeneration? sourceGeneration))
+            throw new InvalidOperationException();
+
+        UProperty property = GetProperty(name);
+        _cachedBytes ??= sourceRemote.ReadObjectBytes(this);
+        sourceRemote.WritePropertyInternal(_cachedBytes, value, property, sourceGeneration);
+
+        if (commit)
+        {
+            // Prefer doing this in bulk after all modified properties are serialized.
+            sourceRemote.WriteObjectBytes(this, _cachedBytes);
+        }
+    }
+
     public T GetPropertyValue<T>(string name) => (T)GetPropertyValue(name, typeof(T))!;
 
     public void ForEachProperty(bool bWithSuper, Func<UProperty, bool> propertyCallback)
@@ -563,6 +606,13 @@ public class UObject : BaseReflectedType
 
         foreach (var property in Class!.GetProperties(bWithSuper))
         {
+            if (property is UMapProperty)
+            {
+                Debug.WriteLine($"skipping {property}");
+                //if (Debugger.IsAttached) Debugger.Break();
+                continue;
+            }
+
             var value = sourceRemote.ReadPropertyInternal(_cachedBytes, null, property, sourceGeneration);
             if (!propertyCallback(property, value))
                 break;
