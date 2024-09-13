@@ -36,4 +36,10 @@ public class UFieldAttribute(string name, int fixedOffset) : Attribute
     /// Sets whether this string should be marshalled as FName, not as FString.
     /// </summary>
     public bool AsFName { get; set; } = false;
+
+    /// <summary>
+    /// Sets whether a UMap string key should be marshalled as FName, not as FString.
+    /// Only valid on UMaps. <see cref="AsFName"/> applies to a string value in such a case 
+    /// </summary>
+    public bool MapKeyAsFName { get; set; } = false;
 }

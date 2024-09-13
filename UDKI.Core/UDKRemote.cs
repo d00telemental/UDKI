@@ -1,10 +1,13 @@
 ﻿using System.Buffers;
 using System.Buffers.Binary;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
 using Iced.Intel;
+using UDKI.Core.Collections;
+using UDKI.Core.Helpers;
 using static Iced.Intel.AssemblerRegisters;
 
 
@@ -398,6 +401,7 @@ public sealed class UDKRemote : IDisposable
     #region Value reading.
 
     const int FArraySize = 16;
+    const int TMapSize = 72;
     const int FNameSize = 8;
     const int IntPtr64Size = 8;
 
@@ -544,8 +548,9 @@ public sealed class UDKRemote : IDisposable
         uint BitMask = uint.MaxValue, 
         UScriptStruct? Struct = null,
         UFunction? Delegate = null,
-        UClass? Interface = null
-    );
+        UClass? Interface = null,
+        StrongBox<FieldContext>? mapKeyContext = null
+        );
 
     /// <summary>Data required for reading an <see cref="UArrayProperty"/> field.</summary>
     internal record ArrayFieldContext(int FieldSize, ArrayFieldContext? Inner);
@@ -672,6 +677,67 @@ public sealed class UDKRemote : IDisposable
             return fieldValue;
         }
 
+        if (valueType.IsGenericType && valueType.GetGenericTypeDefinition() == typeof(UMap<,>) 
+                                    && valueType.GenericTypeArguments is [Type mapKeyType, Type mapValueType])
+        {
+            var tMapStruct = MemoryMarshal.Read<TMap>(bytes);
+            int[] bitArrayData;
+            if (tMapStruct.AllocationFlags.IndirectData is 0)
+            {
+                bitArrayData = tMapStruct.AllocationFlags.InlineData.AsSpan().ToArray();
+            }
+            else
+            {
+                bitArrayData = new int[(tMapStruct.AllocationFlags.MaxBits + 32 - 1) / 32];
+                _process.ReadMemoryChecked(tMapStruct.AllocationFlags.IndirectData, MemoryMarshal.AsBytes(bitArrayData.AsSpan()));
+            }
+            var allocationFlags = new ResizeableBitArray(bitArrayData, tMapStruct.AllocationFlags.NumBits);
+            context.mapKeyContext ??= new(new(context.Generation));
+            // class FPair
+            // {
+            // 	TKey Key;
+            // 	TValue Value;
+            // };
+            int keySize = GetValueSize(mapKeyType, context.mapKeyContext.Value);
+            int valueSize = GetValueSize(mapValueType, context);
+            int valueAlignment = valueSize < 4 ? valueSize : 4;
+            int valueOffset = keySize.Align(valueAlignment);
+            int pairSize = valueOffset + valueSize;
+            //class FElement
+            // {
+            // 	FPair Value;
+            // 	int HashNextId;
+            // 	int HashIndex;
+            // };
+            int elementSize = pairSize.Align(4) + 8;
+            
+            byte[] dataBytes = new byte[tMapStruct.Data.Count * elementSize];
+            _process.ReadMemoryChecked(tMapStruct.Data.Allocation, dataBytes);
+            Span<byte> data = dataBytes;
+            //create with capacity constructor
+            object? instance = Activator.CreateInstance(valueType, tMapStruct.Data.Capacity);
+            if (instance is null)
+            {
+                throw new Exception($"Failed to create instance of type {valueType.FullName}");
+            }
+            var map = (IUMapInternal)instance;
+            foreach (bool flag in allocationFlags)
+            {
+                if (flag)
+                {
+                    var keyVal = ReadFieldValue(data, mapKeyType, context.mapKeyContext.Value, null, null);
+                    var valueVal = ReadFieldValue(data[valueOffset..], mapValueType, context, null, null);
+                    if (!map.TryAdd(keyVal, valueVal))
+                    {
+                        throw new Exception($"Could not add a key of type {keyVal?.GetType().FullName ?? "NULL"} and/or" +
+                                            $" a value of type {valueVal?.GetType().FullName ?? "NULL"} to a {valueType.FullName}");
+                    }
+                }
+                data = data[elementSize..];
+            }
+            return map;
+        }
+
         if (valueType == typeof(DynamicScriptStruct) && context.Struct is UScriptStruct fieldStruct)
         {
             var structSlice = bytes[..fieldStruct.PropertiesSize];
@@ -752,6 +818,14 @@ public sealed class UDKRemote : IDisposable
 
     internal (Type Type, FieldContext Context, ArrayFieldContext? Array) MapPropertyType(UDKGeneration generation, UProperty property)
     {
+        if (property is UMapProperty mapProperty)
+        {
+            (Type keyType, FieldContext keyContext, _) = MapPropertyType(generation, mapProperty.Key!);
+            (Type valueType, FieldContext valueContext, _) = MapPropertyType(generation, mapProperty.Key!);
+            valueContext.mapKeyContext = new(keyContext);
+            return (typeof(UMap<,>).MakeGenericType(keyType, valueType), valueContext, null);
+        }
+
         (Type type, FieldContext context, ArrayFieldContext? array) = property switch
         {
             UByteProperty => (typeof(byte), new FieldContext(generation), null),
@@ -765,7 +839,6 @@ public sealed class UDKRemote : IDisposable
             UInterfaceProperty prop => (typeof(FScriptInterface), new FieldContext(generation, Interface: prop.InterfaceClass), null),
             UStructProperty prop => (typeof(DynamicScriptStruct), new FieldContext(generation, Struct: prop.Struct), null),
             UArrayProperty prop => MapPropertyType(generation, prop.Inner!),
-            //UMapProperty => throw new NotImplementedException(),
             _ => throw new NotImplementedException($"{property.Class!.Name} is not supported"),
         };
 
@@ -856,6 +929,10 @@ public sealed class UDKRemote : IDisposable
             (FieldInfo fieldInfo, UFieldAttribute fieldAttribute) = fieldPair;
 
             FieldContext context = new(generation, fieldAttribute.AsFName);
+            if (fieldAttribute.MapKeyAsFName)
+            {
+                context.mapKeyContext = new(new(generation, true));
+            }
             ReflectedFieldContext reflectedContext = new(objectInstance, fieldInfo, null, refQueue);
 
             var fieldSlice = objectBytes.AsSpan()[fieldAttribute.FixedOffset..];

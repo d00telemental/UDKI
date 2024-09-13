@@ -38,6 +38,25 @@ try
 {
     using var remote = new UDKRemote();
     using var generation = remote.CreateGeneration();
+    while (queryln("Class Name") is string className)
+    {
+        var uClass = remote.FindClassTyped(className, generation);
+
+        if (uClass?.FuncMap != null)
+        {
+            println($"{uClass.Name} Function Map:");
+            foreach ((string? key, UFunction? uFunction) in uClass.FuncMap)
+            {
+                println($"\t{key} : {uFunction?.Name}");
+            }
+            println("");
+        }
+        else
+        {
+            println($"Getting {className} Class Failed!");
+            break;
+        }
+    }
 
     var controller = remote.FindObjectTyped<UObject>("SimplePC_0", generation)!;
     dynamic location = controller.GetPropertyValue<DynamicScriptStruct>("Location");

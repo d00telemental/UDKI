@@ -3,11 +3,39 @@ using System.Data;
 using System.Dynamic;
 using System.Runtime.InteropServices;
 using System.Text;
+using UDKI.Core.Collections;
 
 namespace UDKI.Core;
 
 
 #region Core structs.
+
+/// <summary>
+/// Structure of an Unreal <c>TMap</c>, compatible with in-memory layout.
+/// It is annotated with a "sequential" layout to allow marshalling it via native .NET utilities.
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 4, Size = 72)]
+public struct TMap
+{
+    //TSparseArray
+    public FArray Data;
+    public BitArray AllocationFlags;
+    public int FirstFreeIndex;
+    public int NumFreeIndices;
+    //TSet
+    public int InlineHash;
+    public IntPtr Hash;
+    public int HashSize;
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4, Size = 32)]
+    public struct BitArray
+    {
+        public Fixed4<int> InlineData;
+        public IntPtr IndirectData;
+        public int NumBits;
+        public int MaxBits;
+    }
+}
 
 /// <summary>
 /// Structure of an Unreal <c>FArray</c> / <c>TArray</c>, compatible with in-memory layout.
@@ -685,6 +713,8 @@ public class UState : UStruct
     public EStateFlags StateFlags;
     [UField("LabelTableOffset", 0xD8)]
     public uint LabelTableOffset;
+    [UField("FuncMap", 0xDC, MapKeyAsFName = true)]
+    public UMap<string, UFunction>? FuncMap;
 }
 
 [UClass("Class", fixedSize: 0x280)]
