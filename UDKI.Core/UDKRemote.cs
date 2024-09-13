@@ -2,6 +2,7 @@
 using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using System.Text;
 
 using Iced.Intel;
@@ -42,6 +43,9 @@ public sealed class UDKRemote : IDisposable
     readonly IntPtr _addressObjects;
     readonly IntPtr _addressNames;
     readonly IntPtr _addressClassClass;
+    readonly IntPtr _addressMalloc;
+    readonly IntPtr _addressRealloc;
+    readonly IntPtr _addressFree;
     readonly IntPtr _addressFNameInit;
     readonly IntPtr _addressStaticFindObject;
     readonly IntPtr _addressStaticFindObjectFastInternal;
@@ -84,13 +88,16 @@ public sealed class UDKRemote : IDisposable
 
         _objectMemoryPool = ArrayPool<byte>.Create();
 
-        _sourcePointerField = typeof(UObject).GetField("_sourcePointer", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        _sourceRemoteField = typeof(UObject).GetField("_sourceRemote", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        _sourceGenerationField = typeof(UObject).GetField("_sourceGeneration", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        _sourcePointerField = typeof(BaseReflectedType).GetField("_sourcePointer", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        _sourceRemoteField = typeof(BaseReflectedType).GetField("_sourceRemote", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        _sourceGenerationField = typeof(BaseReflectedType).GetField("_sourceGeneration", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
         _addressObjects = ResolveOffset(UDKOffsets.Objects);
         _addressNames = ResolveOffset(UDKOffsets.Names);
         _addressClassClass = ReadPointer(ResolveOffset(UDKOffsets.ClassClass));
+        _addressMalloc = ResolveOffset(UDKOffsets.appMalloc);
+        _addressRealloc = ResolveOffset(UDKOffsets.appRealloc);
+        _addressFree = ResolveOffset(UDKOffsets.appFree);
         _addressFNameInit = ResolveOffset(UDKOffsets.FNameInit);
         _addressStaticFindObject = ResolveOffset(UDKOffsets.StaticFindObject);
         _addressStaticFindObjectFastInternal = ResolveOffset(UDKOffsets.StaticFindObjectFastInternal);
@@ -240,6 +247,74 @@ public sealed class UDKRemote : IDisposable
 
     #region Allocation and search.
 
+    /// <summary>
+    /// Allocates memory via UDK's <c>appMalloc</c>.
+    /// </summary>
+    /// <param name="size">Number of bytes to allocate.</param>
+    public IntPtr UnrealAlloc(ulong size)
+    {
+        Span<byte> outputBuffer = stackalloc byte[IntPtr64Size];
+
+        Execute([], outputBuffer, (asm) =>
+        {
+            asm.mov(r13, __qword_ptr[rcx + 8]);
+            asm.sub(rsp, 0x20);
+
+            asm.mov(ecx, (uint)size);
+            asm.mov(edx, (uint)16);
+
+            asm.mov(rax, _addressMalloc);
+            asm.call(rax);
+
+            asm.mov(__qword_ptr[r13], rax);
+        });
+        
+        return BinaryPrimitives.ReadIntPtrLittleEndian(outputBuffer);
+    }
+
+    /// <summary>
+    /// Reallocates memory via UDK's <c>appRealloc</c>.
+    /// </summary>
+    /// <param name="pointer">Pointer to previous allocation, returned by <c>appMalloc</c> or <c>appRealloc</c>.</param>
+    /// <param name="size">New number of bytes to allocate.</param>
+    public IntPtr UnrealRealloc(IntPtr pointer, ulong size)
+    {
+        Span<byte> outputBuffer = stackalloc byte[IntPtr64Size];
+
+        Execute([], outputBuffer, (asm) =>
+        {
+            asm.mov(r13, __qword_ptr[rcx + 8]);
+            asm.sub(rsp, 0x20);
+
+            asm.mov(rcx, pointer);
+            asm.mov(edx, (uint)size);
+            asm.mov(r8d, (uint)16);
+
+            asm.mov(rax, _addressRealloc);
+            asm.call(rax);
+
+            asm.mov(__qword_ptr[r13], rax);
+        });
+
+        return BinaryPrimitives.ReadIntPtrLittleEndian(outputBuffer);
+    }
+
+    /// <summary>
+    /// Deallocates memory via UDK's <c>appFree</c>.
+    /// </summary>
+    /// <param name="pointer">Pointer to previous allocation, returned by <c>appMalloc</c> or <c>appRealloc</c>.</param>
+    public void UnrealFree(IntPtr pointer)
+    {
+        Execute([], [], (asm) =>
+        {
+            asm.sub(rsp, 0x20);
+            asm.mov(rcx, pointer);
+            asm.mov(rax, _addressFree);
+            asm.call(rax);
+        });
+    }
+
+
     /// <summary>Looks up or inserts an <c>FName</c> by string.</summary>
     /// <param name="value">String value.</param>
     /// <param name="bSplitName">Whether to split number part from string <c>value</c>.</param>
@@ -275,6 +350,69 @@ public sealed class UDKRemote : IDisposable
 
         return new FName(outputBuffer);
     }
+
+    /// <summary>
+    /// Initializes a new <c>FString</c> with a value.
+    /// </summary>
+    /// <param name="value">String that the new <c>FString</c> should contain.</param>
+    /// <returns>Initialized <c>FString</c> instance as the underlying <c>FArray</c>.</returns>
+    public FArray InitString(string value)
+    {
+        FArray storage = new();
+        InitString(ref storage, value);
+        return storage;
+    }
+
+    /// <summary>
+    /// Re-initializes an existing <c>FString</c> in-place, serializing it to and from bytes.
+    /// </summary>
+    /// <param name="view">Bytes covering the underlying <c>FArray</c>.</param>
+    /// <param name="value">String that the <c>FString</c> should contain.</param>
+    public void InitString(Span<byte> view, string value)
+    {
+        FArray storage = new(view);
+        InitString(ref storage, value);
+        storage.Write(view);
+    }
+
+    /// <summary>
+    /// Re-initializes an existing <c>FString</c> in-place.
+    /// </summary>
+    /// <param name="array">Previous <c>FString</c> instance as the underlying <c>FArray</c>.</param>
+    /// <param name="value">String that the <c>FString</c> should contain.</param>
+    public void InitString(ref FArray array, string value)
+    {
+        var bytes = Encoding.Unicode.GetBytes(value);
+        InitArray(ref array, bytes.Length != 0 ? bytes.Length + 2 : 0);
+
+        if (array.Count != 0)
+        {
+            _process.WriteMemoryChecked(array.Allocation, bytes);
+            _process.WriteMemoryChecked(array.Allocation + bytes.Length, [0x00, 0x00]);
+        }
+    }
+
+    /// <summary>
+    /// Re-initializes an existing array in-place so that you can safely write <c>byteCount</c> bytes into it.
+    /// </summary>
+    public void InitArray(ref FArray array, int count, int granularity = 32)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        ArgumentOutOfRangeException.ThrowIfLessThan(1, granularity);
+        
+        array.Count = count;
+        if (array.Allocation == IntPtr.Zero)
+        {
+            array.Capacity = AlignToMultiple(array.Count, granularity);
+            array.Allocation = UnrealAlloc((ulong)array.Capacity);
+        }
+        else if (array.Capacity < array.Count)
+        {
+            array.Capacity = AlignToMultiple(array.Count, granularity);
+            array.Allocation = UnrealRealloc(array.Allocation, (ulong)array.Capacity);
+        }
+    }
+
 
     /// <summary>Searches for a class by name.</summary>
     /// <param name="className">Unscoped class name (without outer chain or class).</param>
@@ -395,7 +533,7 @@ public sealed class UDKRemote : IDisposable
     #endregion
 
 
-    #region Value reading.
+    #region Value reading / writing.
 
     const int FArraySize = 16;
     const int FNameSize = 8;
@@ -713,7 +851,6 @@ public sealed class UDKRemote : IDisposable
                 // We do not have a ReflectedFieldContext when serializing an Unreal-reflected property,
                 // so we should read a new instance directly. Internally it will create a new reference queue
                 // and iterate all the instances it discovers down that reference tree.
-                Debug.Assert(reflectedContext is null);
                 return ReadReflectedInstance(valueType, fieldPointer, context.Generation);
             }
         }
@@ -735,10 +872,131 @@ public sealed class UDKRemote : IDisposable
             }
         }
 
-        throw new NotImplementedException($"value reading for {valueType.FullName} is not implemented");
+        throw new NotImplementedException($"reading value of type '{valueType.FullName}' is not implemented");
     }
 
-    #endregion
+    void WriteFieldValue(Span<byte> bytes, object? value, Type valueType, FieldContext context,
+        ArrayFieldContext? arrayContext, ReflectedFieldContext? reflectedContext)
+    {
+        if (value is null) throw new NotImplementedException("writing null value is not implemented");
+
+        if (valueType == typeof(sbyte) && value is sbyte) { bytes[0] = (byte)value; return; }
+        if (valueType == typeof(byte) && value is byte) { bytes[0] = (byte)value; return; }
+        if (valueType == typeof(short) && value is short) { BinaryPrimitives.WriteInt16LittleEndian(bytes[..sizeof(short)], (short)value); return; }
+        if (valueType == typeof(ushort) && value is ushort) { BinaryPrimitives.WriteUInt16LittleEndian(bytes[..sizeof(ushort)], (ushort)value); return; }
+        if (valueType == typeof(int) && value is int) { BinaryPrimitives.WriteInt32LittleEndian(bytes[..sizeof(int)], (int)value); return; }
+        if (valueType == typeof(uint) && value is uint) { BinaryPrimitives.WriteUInt32LittleEndian(bytes[..sizeof(uint)], (uint)value); return; }
+        if (valueType == typeof(long) && value is long) { BinaryPrimitives.WriteInt64LittleEndian(bytes[..sizeof(long)], (long)value); return; }
+        if (valueType == typeof(ulong) && value is ulong) { BinaryPrimitives.WriteUInt64LittleEndian(bytes[..sizeof(ulong)], (ulong)value); return; }
+        if (valueType == typeof(IntPtr) && value is IntPtr) { BinaryPrimitives.WriteIntPtrLittleEndian(bytes[..IntPtr64Size], (IntPtr)value); return; }
+        if (valueType == typeof(UIntPtr) && value is UIntPtr) { BinaryPrimitives.WriteUIntPtrLittleEndian(bytes[..IntPtr64Size], (UIntPtr)value); return; }
+        if (valueType == typeof(float) && value is float) { BinaryPrimitives.WriteSingleLittleEndian(bytes[..sizeof(float)], (float)value); return; }
+        if (valueType == typeof(double) && value is double) { BinaryPrimitives.WriteDoubleLittleEndian(bytes[..sizeof(double)], (double)value); return; }
+
+        if (valueType == typeof(bool) && value is bool)
+        {
+            ulong setBitsCount = Popcnt.X64.PopCount(context.BitMask);
+            if (setBitsCount != 1) throw new InvalidDataException("expected a single-bit boolean mask");
+
+            uint fieldInteger = BinaryPrimitives.ReadUInt32LittleEndian(bytes[..sizeof(uint)]);
+            uint fieldValue = (bool)value ? (fieldInteger | context.BitMask) : (fieldInteger & ~context.BitMask);
+
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes[..sizeof(uint)], fieldValue);
+            return;
+        }
+
+        if (valueType == typeof(string) && value is string)
+        {
+            if (context.AsFName)
+            {
+                FName name = InitName((string)value);
+                name.Write(bytes[..FNameSize]);
+            }
+            else
+            {
+                InitString(bytes[..FArraySize], (string)value);
+            }
+
+            return;
+        }
+
+        if (valueType.IsSZArray && value.GetType() == valueType)
+        {
+            var elemType = valueType.GetElementType()!;
+            var elemSize = arrayContext?.FieldSize ?? GetValueSize(elemType, context);
+
+            var fieldBuffer = new byte[elemSize];
+            var fieldValue = (Array)value;
+
+            FArray fieldArray = new(bytes[..FArraySize]);
+            InitArray(ref fieldArray, fieldValue.Length);
+
+            for (var i = 0; i < fieldArray.Count; i++)
+            {
+                var itemOffset = fieldArray.GetItemOffset(i, elemSize);
+                var itemValue = fieldValue.GetValue(i);
+
+                WriteFieldValue(fieldBuffer, itemValue, elemType, context, arrayContext?.Inner, reflectedContext);
+                _process.WriteMemoryChecked(itemOffset, fieldBuffer);
+            }
+
+            return;
+        }
+
+        if (valueType == typeof(DynamicScriptStruct) && value.GetType() == valueType)
+        {
+            DynamicScriptStruct structInstance = (DynamicScriptStruct)value;
+            if (context.Struct is UScriptStruct fieldStruct && fieldStruct == structInstance._struct)
+            {
+                var structSlice = bytes[..fieldStruct.PropertiesSize];
+
+                foreach (var fieldProperty in fieldStruct.GetProperties(bWithSuper: false))
+                {
+                    // TODO: Optimize this value lookup.
+                    var fieldValue = structInstance._fields[fieldProperty.Name];
+                    WritePropertyInternal(structSlice, fieldValue, fieldProperty, context.Generation);
+                }
+
+                return;
+            }
+        }
+
+        if (valueType.IsClass)
+        {
+            if (value is BaseReflectedType reflectedInstance)
+            {
+                var fieldPointer = reflectedInstance._sourcePointer;
+                BinaryPrimitives.WriteIntPtrLittleEndian(bytes[..IntPtr64Size], fieldPointer);
+                return;
+            }
+            else if (value is null)
+            {
+                BinaryPrimitives.WriteIntPtrLittleEndian(bytes[..IntPtr64Size], IntPtr.Zero);
+                return;
+            }
+        }
+
+        if (valueType.IsEnum && value.GetType() == valueType)
+        {
+            var enumBaseType = Enum.GetUnderlyingType(valueType);
+
+            if (enumBaseType == typeof(uint))
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes[..sizeof(uint)], (uint)value);
+                return;
+            }
+
+            if (enumBaseType == typeof(ulong))
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(bytes[..sizeof(ulong)], (ulong)value);
+                return;
+            }
+        }
+
+        throw new NotImplementedException($"writing value of type '{value?.GetType()}' into field of type '{valueType}' is not implemented");
+    }
+
+#endregion
 
 
     #region Property reading / writing.
@@ -801,9 +1059,7 @@ public sealed class UDKRemote : IDisposable
         Span<byte> slice = objectBytes[property.Offset..];
 
         var field = MapPropertyType(generation, property);
-        // TODO: Continue property serialization...
-
-        throw new NotImplementedException();
+        WriteFieldValue(slice, fieldValue, field.Type, field.Context, field.Array, null);
     }
 
     #endregion
@@ -840,11 +1096,11 @@ public sealed class UDKRemote : IDisposable
         var objectInstance = Activator.CreateInstance(type)!;
         generation.Instances[address] = (objectInstance, type);
 
-        if (objectInstance is UObject @object)
+        if (objectInstance is BaseReflectedType reflectedInstance)
         {
-            _sourcePointerField.SetValue(@object, address);
-            _sourceRemoteField.SetValue(@object, new WeakReference<UDKRemote>(this));
-            _sourceGenerationField.SetValue(@object, new WeakReference<UDKGeneration>(generation));
+            _sourcePointerField.SetValue(reflectedInstance, address);
+            _sourceRemoteField.SetValue(reflectedInstance, new WeakReference<UDKRemote>(this));
+            _sourceGenerationField.SetValue(reflectedInstance, new WeakReference<UDKGeneration>(generation));
         }
 
         var objectBytes = _objectMemoryPool.Rent(classAttribute.FixedSize);

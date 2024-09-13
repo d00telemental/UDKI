@@ -25,14 +25,24 @@ public struct FArray
         // ...
     }
 
-    public FArray(ReadOnlySpan<byte> arrayView)
-    {
-        if (arrayView.Length != 16)
-            throw new ArgumentException("array view too short", nameof(arrayView));
+    public FArray(ReadOnlySpan<byte> view) => Read(view);
 
-        Allocation = BinaryPrimitives.ReadIntPtrLittleEndian(arrayView[0..8]);
-        Count = BinaryPrimitives.ReadInt32LittleEndian(arrayView[8..12]);
-        Capacity = BinaryPrimitives.ReadInt32LittleEndian(arrayView[12..16]);
+    public void Read(ReadOnlySpan<byte> view)
+    {
+        if (view.Length < 16) throw new ArgumentException("array view too short", nameof(view));
+
+        Allocation = BinaryPrimitives.ReadIntPtrLittleEndian(view[0..8]);
+        Count = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
+        Capacity = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
+    }
+
+    public readonly void Write(Span<byte> view)
+    {
+        if (view.Length < 16) throw new ArgumentException("array view too short", nameof(view));
+
+        BinaryPrimitives.WriteIntPtrLittleEndian(view[0..8], Allocation);
+        BinaryPrimitives.WriteInt32LittleEndian(view[8..12], Count);
+        BinaryPrimitives.WriteInt32LittleEndian(view[12..16], Capacity);
     }
 
     public readonly IntPtr GetItemOffset(int index, int size)
@@ -67,13 +77,22 @@ public struct FName
         // ...
     }
 
-    public FName(ReadOnlySpan<byte> view)
+    public FName(ReadOnlySpan<byte> view) => Read(view);
+
+    public void Read(ReadOnlySpan<byte> view)
     {
-        if (view.Length < 8)
-            throw new ArgumentException("view too short", nameof(view));
+        if (view.Length < 8) throw new ArgumentException("view too short", nameof(view));
 
         EntryIndex = BinaryPrimitives.ReadInt32LittleEndian(view[0..4]);
         NumberPlusOne = BinaryPrimitives.ReadInt32LittleEndian(view[4..8]);
+    }
+
+    public readonly void Write(Span<byte> view)
+    {
+        if (view.Length < 8) throw new ArgumentException("view too short", nameof(view));
+
+        BinaryPrimitives.WriteInt32LittleEndian(view[0..4], EntryIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(view[4..8], NumberPlusOne);
     }
 }
 
@@ -349,10 +368,79 @@ public enum EFunctionFlags : uint
 #endregion
 
 
-#region Miscellaneous types.
+#region ScriptStruct implementation.
+
+/// <summary>Stores and provides dynamic access to properties of a serialized <see cref="UScriptStruct"/>.</summary>
+/// <remarks>Make sure to assign values of this type to <c>dynamic</c> variables to be able to use dynamic member lookup.</remarks>
+public sealed class DynamicScriptStruct : DynamicObject
+{
+    internal Dictionary<string, object?> _fields = [];
+    internal UScriptStruct? _struct = null;
+
+    public UScriptStruct Struct => _struct!;
+
+    public override bool TryGetMember(GetMemberBinder binder, out object? result)
+    {
+        if (_fields.TryGetValue(binder.Name, out result)) return true;
+        throw new KeyNotFoundException($"can't find member '{binder.Name}' in {_struct}");
+    }
+
+    public override bool TrySetMember(SetMemberBinder binder, object? value)
+    {
+        if (_fields.TryGetValue(binder.Name, out object? old))
+        {
+            if (old?.GetType() == value?.GetType())
+            {
+                _fields[binder.Name] = value;
+                return true;
+            }
+        }
+
+        throw new KeyNotFoundException($"can't find member '{binder.Name}' in {_struct}");
+    }
+
+    public override string ToString()
+    {
+        StringBuilder stringBuilder = new();
+
+        stringBuilder.Append(_struct?.Name);
+        stringBuilder.Append('(');
+
+        foreach ((string name, object? value) in _fields)
+        {
+            stringBuilder.Append(name);
+            stringBuilder.Append('=');
+            stringBuilder.Append(value?.ToString() ?? "(null)");
+            stringBuilder.Append(", ");
+        }
+
+        if (_fields.Count != 0)
+        {
+            // Chop off the trailing comma.
+            stringBuilder.Remove(stringBuilder.Length - 2, 2);
+        }
+
+        stringBuilder.Append(')');
+
+        return stringBuilder.ToString();
+    }
+}
+
+#endregion
+
+
+#region Statically-reflected types.
+
+public class BaseReflectedType
+{
+    protected internal IntPtr _sourcePointer;
+    protected internal WeakReference<UDKRemote>? _sourceRemote;
+    protected internal WeakReference<UDKGeneration>? _sourceGeneration;
+}
+
 
 [UClass("FFrame", fixedSize: 0x44)]
-public class FFrame
+public class FFrame : BaseReflectedType
 {
     [UField("VfTableObject", 0x00)]
     public IntPtr VfTableObject;
@@ -395,66 +483,11 @@ public class FStackFrame : FFrame
 #endregion
 
 
-#region ScriptStruct implementation.
-
-/// <summary>Stores and provides dynamic access to properties of a serialized <see cref="UScriptStruct"/>.</summary>
-/// <remarks>Make sure to assign values of this type to <c>dynamic</c> variables to be able to use dynamic member lookup.</remarks>
-public sealed class DynamicScriptStruct : DynamicObject
-{
-    internal Dictionary<string, object?> _fields = [];
-    internal UScriptStruct? _struct = null;
-
-    internal DynamicScriptStruct() { }
-
-    public UScriptStruct Struct => _struct!;
-
-    public override bool TryGetMember(GetMemberBinder binder, out object? result)
-    {
-        if (_fields.TryGetValue(binder.Name, out result)) return true;
-        throw new KeyNotFoundException($"can't find member '{binder.Name}' in {_struct}");
-    }
-
-    public override bool TrySetMember(SetMemberBinder binder, object? value)
-        => throw new InvalidOperationException("ScriptStruct members are read-only");
-
-    public override string ToString()
-    {
-        StringBuilder stringBuilder = new();
-
-        stringBuilder.Append(_struct?.Name);
-        stringBuilder.Append('(');
-
-        foreach ((string name, object? value) in _fields)
-        {
-            stringBuilder.Append(name);
-            stringBuilder.Append('=');
-            stringBuilder.Append(value?.ToString() ?? "(null)");
-            stringBuilder.Append(", ");
-        }
-
-        if (_fields.Count != 0)
-        {
-            // Chop off the trailing comma.
-            stringBuilder.Remove(stringBuilder.Length - 2, 2);
-        }
-
-        stringBuilder.Append(')');
-
-        return stringBuilder.ToString();
-    }
-}
-
-#endregion
-
-
 #region UObject hierarchy.
 
 [UClass("Object", fixedSize: 0x60)]
-public class UObject
+public class UObject : BaseReflectedType
 {
-    protected internal IntPtr _sourcePointer;
-    protected internal WeakReference<UDKRemote>? _sourceRemote;
-    protected internal WeakReference<UDKGeneration>? _sourceGeneration;
     protected internal byte[]? _cachedBytes;
 
     [UField("VfTableObject", 0x00)]
