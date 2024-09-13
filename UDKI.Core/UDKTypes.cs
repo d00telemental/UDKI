@@ -532,7 +532,7 @@ public class UObject
 
         UProperty property = GetProperty(name);
         _cachedBytes ??= sourceRemote.ReadObjectBytes(this);
-        return sourceRemote.ReadPropertyInternal(_cachedBytes, checkType, sourceGeneration, property);
+        return sourceRemote.ReadPropertyInternal(_cachedBytes, checkType, property, sourceGeneration);
     }
 
     public T GetPropertyValue<T>(string name) => (T)GetPropertyValue(name, typeof(T))!;
@@ -558,7 +558,7 @@ public class UObject
 
         foreach (var property in Class!.GetProperties(bWithSuper))
         {
-            var value = sourceRemote.ReadPropertyInternal(_cachedBytes, null, sourceGeneration, property);
+            var value = sourceRemote.ReadPropertyInternal(_cachedBytes, null, property, sourceGeneration);
             if (!propertyCallback(property, value))
                 break;
         }
