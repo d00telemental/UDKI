@@ -47,6 +47,7 @@ public sealed class UDKRemote : IDisposable
     readonly IntPtr _addressRealloc;
     readonly IntPtr _addressFree;
     readonly IntPtr _addressFNameInit;
+    readonly IntPtr _addressProcessEvent;
     readonly IntPtr _addressStaticFindObject;
     readonly IntPtr _addressStaticFindObjectFastInternal;
 
@@ -99,6 +100,7 @@ public sealed class UDKRemote : IDisposable
         _addressRealloc = ResolveOffset(UDKOffsets.appRealloc);
         _addressFree = ResolveOffset(UDKOffsets.appFree);
         _addressFNameInit = ResolveOffset(UDKOffsets.FNameInit);
+        _addressProcessEvent = ResolveOffset(UDKOffsets.ProcessEvent);
         _addressStaticFindObject = ResolveOffset(UDKOffsets.StaticFindObject);
         _addressStaticFindObjectFastInternal = ResolveOffset(UDKOffsets.StaticFindObjectFastInternal);
     }
@@ -224,6 +226,7 @@ public sealed class UDKRemote : IDisposable
             _process.WriteMemoryChecked(allocatedBuffer, assembledBinary);
             _process.ProtectExecutable(allocatedBuffer, alignedLength);
 
+            Debug.WriteLine($"Executing new thread at 0x{allocatedBuffer:X}...");
             var execThread = _process.CreateThread(allocatedBuffer, _paramStructAllocation, out _);
 
             Windows.WaitForSingleObject(execThread);
@@ -240,6 +243,97 @@ public sealed class UDKRemote : IDisposable
             // Extract bytes from the process-side output buffer.
             _process.ReadMemoryChecked(_outputBufferAllocation, outputBuffer);
         }
+    }
+
+    public T? CallScript<T>(UObject context, string funcName, params object[] args)
+        => (T?)CallScript(context, funcName, args);
+
+    public object? CallScript(UObject context, string funcName, params object[] args)
+    {
+        UFunction function = context.FindFunctionChecked(funcName);
+
+        UProperty? returnProperty = null;
+        List<UProperty> paramProperties = [];
+
+        foreach (var param in function.GetParams())
+        {
+            if (param.PropertyFlags.HasFlag(EPropertyFlags.ReturnParam))
+            {
+                Debug.Assert(returnProperty is null);
+                returnProperty = param;
+                continue;
+            }
+
+            paramProperties.Add(param);
+        }
+
+        paramProperties.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+
+        if (paramProperties.Count != 0 && returnProperty?.Offset <= paramProperties.Last().Offset)
+            throw new InvalidDataException($"function '{function}' has return param at unusual place");
+
+        if (paramProperties.Count != args.Length)
+        {
+            var (paramCount, argCount) = (paramProperties.Count, args.Length);
+            throw new ArgumentException($"function '{function}' with {paramCount} params can't be invoked with {argCount} args");
+        }
+
+        return CallScriptInternal(context, function, paramProperties, returnProperty, args);
+    }
+
+    internal object? CallScriptInternal(UObject context, UFunction function,
+        List<UProperty> paramProperties, UProperty? returnProperty, params object?[] args)
+    {
+        if (!(context._sourceGeneration?.TryGetTarget(out UDKGeneration? sourceGeneration) ?? false))
+            throw new InvalidOperationException();
+
+        byte[] inputBuffer = new byte[16 + function.ParmsSize];
+        Span<byte> outputBuffer = stackalloc byte[8];
+
+        BinaryPrimitives.WriteIntPtrLittleEndian(inputBuffer.AsSpan()[0..8], context._sourcePointer);
+        BinaryPrimitives.WriteIntPtrLittleEndian(inputBuffer.AsSpan()[8..16], function._sourcePointer);
+
+        if (function.ParmsSize > 0)
+        {
+            Span<byte> paramBuffer = inputBuffer.AsSpan()[16..];
+            for (var i = 0; i < paramProperties.Count; i++)
+            {
+                (UProperty parameter, object? value) = (paramProperties[i], args[i]);
+                WritePropertyInternal(paramBuffer, value, parameter, sourceGeneration);
+            }
+        }
+
+        Execute(inputBuffer, outputBuffer, (asm) =>
+        {
+            asm.mov(r12, __qword_ptr[rcx]);
+            asm.mov(r13, __qword_ptr[rcx + 8]);
+
+            asm.sub(rsp, 0x20);
+
+            asm.mov(rcx, __qword_ptr[r12]);
+            asm.mov(rdx, __qword_ptr[r12 + 8]);
+            asm.lea(r8,  __qword_ptr[r12 + 16]);
+            asm.mov(r9,  (ulong)0);
+
+            asm.mov(rax, _addressProcessEvent);
+            asm.call(rax);
+
+            asm.lea(rax, __qword_ptr[r12 + 16]);
+            asm.mov(__qword_ptr[r13], rax);
+        });
+
+        if (returnProperty is UProperty returnChecked)
+        {
+            Debug.Assert(function.ParmsSize > 0);
+
+            var paramPointer = BinaryPrimitives.ReadIntPtrLittleEndian(outputBuffer);
+            var paramBuffer = inputBuffer.AsSpan()[16..];
+
+            _process.ReadMemoryChecked(paramPointer, paramBuffer);
+            return ReadPropertyInternal(paramBuffer, null, returnChecked, sourceGeneration);
+        }
+
+        return null;
     }
 
     #endregion

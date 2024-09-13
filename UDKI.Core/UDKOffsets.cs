@@ -17,6 +17,7 @@ public static class UDKOffsets
     public static readonly IntPtr appRealloc = 0x1CAF90;
     public static readonly IntPtr appFree = 0x1CAFE0;
     public static readonly IntPtr FNameInit = 0x268090;
+    public static readonly IntPtr ProcessEvent = 0x216EC0;
     public static readonly IntPtr StaticFindObject = 0x270520;
     public static readonly IntPtr StaticFindObjectFastInternal = 0x270280;
 }

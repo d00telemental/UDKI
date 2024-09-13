@@ -39,12 +39,15 @@ try
     using var remote = new UDKRemote();
     using var generation = remote.CreateGeneration();
 
-    var controller = remote.FindObjectTyped<UObject>("SimplePC_0", generation)!;
-    dynamic location = controller.GetPropertyValue<DynamicScriptStruct>("Location");
+    var console = remote.FindObjectTyped<UObject>("UTConsole_1", generation)!;
 
-    println($"player location = ({location.X}, {location.Y}, {location.Z})");
+    remote.CallScript(console, "ClearOutput");
 
-    Debugger.Break();
+    for (int i = 0; i < 10; i++)
+    {
+        remote.CallScript(console, "OutputTextLine", $"hello there! (#{i})");
+        Thread.Sleep(1250);
+    }
 }
 catch (Win32Exception exception) when (!Debugger.IsAttached)
 {
