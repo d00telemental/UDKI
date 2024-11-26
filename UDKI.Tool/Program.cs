@@ -38,30 +38,23 @@ try
 {
     using var remote = new UDKRemote();
     using var generation = remote.CreateGeneration();
-    while (queryln("Class Name") is string className)
+
+    string className = "PlayerController";
+    var uClass = remote.FindClassTyped(className, generation);
+
+    if (uClass?.FuncMap != null)
     {
-        var uClass = remote.FindClassTyped(className, generation);
-
-        if (uClass?.FuncMap != null)
+        println($"{uClass.Name} Function Map:");
+        foreach ((string? key, UFunction? uFunction) in uClass.FuncMap)
         {
-            println($"{uClass.Name} Function Map:");
-            foreach ((string? key, UFunction? uFunction) in uClass.FuncMap)
-            {
-                println($"\t{key} : {uFunction?.Name}");
-            }
-            println("");
+            println($"\t{key} : {uFunction?.Name}");
         }
-        else
-        {
-            println($"Getting {className} Class Failed!");
-            break;
-        }
+        println("");
     }
-
-    var controller = remote.FindObjectTyped<UObject>("SimplePC_0", generation)!;
-    dynamic location = controller.GetPropertyValue<DynamicScriptStruct>("Location");
-
-    println($"player location = ({location.X}, {location.Y}, {location.Z})");
+    else
+    {
+        printlnc(ConsoleColor.Red, $"Getting {className} Class Failed!");
+    }
 
     Debugger.Break();
 }

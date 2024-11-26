@@ -681,6 +681,7 @@ public sealed class UDKRemote : IDisposable
                                     && valueType.GenericTypeArguments is [Type mapKeyType, Type mapValueType])
         {
             var tMapStruct = MemoryMarshal.Read<TMap>(bytes);
+
             int[] bitArrayData;
             if (tMapStruct.AllocationFlags.IndirectData is 0)
             {
@@ -691,8 +692,10 @@ public sealed class UDKRemote : IDisposable
                 bitArrayData = new int[(tMapStruct.AllocationFlags.MaxBits + 32 - 1) / 32];
                 _process.ReadMemoryChecked(tMapStruct.AllocationFlags.IndirectData, MemoryMarshal.AsBytes(bitArrayData.AsSpan()));
             }
+
             var allocationFlags = new ResizeableBitArray(bitArrayData, tMapStruct.AllocationFlags.NumBits);
             context.mapKeyContext ??= new(new(context.Generation));
+
             // class FPair
             // {
             // 	TKey Key;
@@ -700,42 +703,49 @@ public sealed class UDKRemote : IDisposable
             // };
             int keySize = GetValueSize(mapKeyType, context.mapKeyContext.Value);
             int valueSize = GetValueSize(mapValueType, context);
-            int valueAlignment = valueSize < 4 ? valueSize : 4;
-            int valueOffset = keySize.Align(valueAlignment);
-            int pairSize = valueOffset + valueSize;
-            //class FElement
+            int valueOffset = keySize.Align(valueSize < 4 ? valueSize : 4);
+
+            // class FElement
             // {
             // 	FPair Value;
             // 	int HashNextId;
             // 	int HashIndex;
             // };
-            int elementSize = pairSize.Align(4) + 8;
+            int elementSize = (valueOffset + valueSize).Align(4) + 8;
             
-            byte[] dataBytes = new byte[tMapStruct.Data.Count * elementSize];
+            var dataBytes = new byte[tMapStruct.Data.Count * elementSize];
             _process.ReadMemoryChecked(tMapStruct.Data.Allocation, dataBytes);
+
+            // Create with capacity constructor.
+            IUMapInternal instance = Activator.CreateInstance(valueType, tMapStruct.Data.Capacity) as IUMapInternal
+                ?? throw new Exception($"failed to create instance of type '{valueType.FullName}'");
+
             Span<byte> data = dataBytes;
-            //create with capacity constructor
-            object? instance = Activator.CreateInstance(valueType, tMapStruct.Data.Capacity);
-            if (instance is null)
-            {
-                throw new Exception($"Failed to create instance of type {valueType.FullName}");
-            }
-            var map = (IUMapInternal)instance;
+
             foreach (bool flag in allocationFlags)
             {
                 if (flag)
                 {
-                    var keyVal = ReadFieldValue(data, mapKeyType, context.mapKeyContext.Value, null, null);
-                    var valueVal = ReadFieldValue(data[valueOffset..], mapValueType, context, null, null);
-                    if (!map.TryAdd(keyVal, valueVal))
+                    object? key = ReadFieldValue(data[..valueOffset], mapKeyType, context.mapKeyContext.Value, null, null);
+                    object? value = ReadFieldValue(data[valueOffset..], mapValueType, context, null, null);
+
+                    if (reflectedContext is ReflectedFieldContext rctx)
                     {
-                        throw new Exception($"Could not add a key of type {keyVal?.GetType().FullName ?? "NULL"} and/or" +
-                                            $" a value of type {valueVal?.GetType().FullName ?? "NULL"} to a {valueType.FullName}");
+                        if (key is null || value is null)
+                            return null;
+                    }
+
+                    if (!instance.TryAdd(key, value))
+                    {
+                        throw new Exception($"could not add a key of type '{key?.GetType().FullName}' and/or" +
+                                            $" a value of type '{value?.GetType().FullName}' to a '{valueType.FullName}'");
                     }
                 }
+
                 data = data[elementSize..];
             }
-            return map;
+
+            return instance;
         }
 
         if (valueType == typeof(DynamicScriptStruct) && context.Struct is UScriptStruct fieldStruct)
@@ -812,12 +822,13 @@ public sealed class UDKRemote : IDisposable
     internal bool CheckPropertyOwnership(UProperty property)
         => (property._sourceRemote?.TryGetTarget(out var checkRemote) ?? false) && checkRemote == this;
 
-    internal static (Type Type, FieldContext Context, ArrayFieldContext? Array) MapPropertyType(UDKGeneration generation, UProperty property)
+    internal static (Type Type, FieldContext Context, ArrayFieldContext? Array)
+        MapPropertyType(UDKGeneration generation, UProperty property)
     {
         if (property is UMapProperty mapProperty)
         {
             (Type keyType, FieldContext keyContext, _) = MapPropertyType(generation, mapProperty.Key!);
-            (Type valueType, FieldContext valueContext, _) = MapPropertyType(generation, mapProperty.Key!);
+            (Type valueType, FieldContext valueContext, _) = MapPropertyType(generation, mapProperty.Value!);
             valueContext.mapKeyContext = new(keyContext);
             return (typeof(UMap<,>).MakeGenericType(keyType, valueType), valueContext, null);
         }
@@ -887,6 +898,8 @@ public sealed class UDKRemote : IDisposable
     object? ReadReflectedInstanceInternal(Type type, IntPtr address, UDKGeneration generation,
         Queue<RefQueueItem> refQueue, out UClassAttribute classAttribute)
     {
+        //Debug.WriteLine($"ReadReflectedInstanceInternal, address = 0x{address:x}, refQueue.Count = {refQueue.Count}");
+
         if (address == IntPtr.Zero)
         {
             classAttribute = new(string.Empty, 0);
@@ -944,10 +957,10 @@ public sealed class UDKRemote : IDisposable
             (FieldInfo fieldInfo, UFieldAttribute fieldAttribute) = fieldPair;
 
             FieldContext context = new(generation, fieldAttribute.AsFName);
+
             if (fieldAttribute.MapKeyAsFName)
-            {
-                context.mapKeyContext = new(new(generation, true));
-            }
+                context.mapKeyContext = new(new(generation, AsFName: true));
+
             ReflectedFieldContext reflectedContext = new(objectInstance, fieldInfo, null, refQueue);
 
             var fieldSlice = objectBytes.AsSpan()[fieldAttribute.FixedOffset..];
@@ -990,12 +1003,12 @@ public sealed class UDKRemote : IDisposable
                 array.SetValue(valueInstance, index.Value!);
             }
 
-            if (valueInstance is UObject @object && @object.Class is null)
-            {
-                // If UObject.Class is null, CheckNeedsDowncast(..) couldn't have checked for a downcast,
-                // so we'll keep re-enqueuing this instance until it can actually check the reflected class.
-                refQueue.Enqueue(new(outer, field, valueInstance.GetType(), pointer, index));
-            }
+            //if (valueInstance is UObject @object && @object.Class is null)
+            //{
+            //    // If UObject.Class is null, CheckNeedsDowncast(..) couldn't have checked for a downcast,
+            //    // so we'll keep re-enqueuing this instance until it can actually check the reflected class.
+            //    refQueue.Enqueue(new(outer, field, valueInstance.GetType(), pointer, index));
+            //}
         }
 
         if (CheckNeedsDowncast(instance, classAttribute.Name, out var lowerType))
